@@ -1,6 +1,5 @@
 # KumoMTA Clean Installer
 
-[![CI](https://github.com/worthmindbd/KumoMTA-Setup/actions/workflows/ci.yml/badge.svg)](https://github.com/worthmindbd/KumoMTA-Setup/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Ubuntu 22.04 LTS](https://img.shields.io/badge/Ubuntu-22.04%20LTS-E95420?logo=ubuntu&logoColor=white)
 
