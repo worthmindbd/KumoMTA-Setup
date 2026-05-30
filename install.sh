@@ -41,55 +41,78 @@ INSTALL_LOG="/var/log/kumomta-install.log"
 KUMO_USER="kumod"
 
 # ----------------------------------------------------------------------------
-# Styling / logging helpers
+# Styling + terminal-safe IO
+#
+# Value-returning helpers (ask/ask_num/ask_secret) run inside $( ... ), which
+# captures stdout. So ALL human-facing UI (prompts, menus, status, spinners)
+# is written to the controlling terminal ($UI) and never to stdout. This is
+# what makes prompts reliably visible.
 # ----------------------------------------------------------------------------
-if [[ -t 1 ]]; then
+export DEBIAN_FRONTEND=noninteractive
+
+if [[ -t 1 || -e /dev/tty ]]; then
   RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YEL=$'\033[1;33m'
-  BLU=$'\033[0;36m'; BLD=$'\033[1m'; NC=$'\033[0m'
+  BLU=$'\033[0;34m'; CYN=$'\033[0;36m'; MAG=$'\033[0;35m'
+  DIM=$'\033[2m'; BLD=$'\033[1m'; NC=$'\033[0m'
 else
-  RED=""; GRN=""; YEL=""; BLU=""; BLD=""; NC=""
+  RED=""; GRN=""; YEL=""; BLU=""; CYN=""; MAG=""; DIM=""; BLD=""; NC=""
 fi
-info()   { echo "${BLU}[*]${NC} $*"; }
-ok()     { echo "${GRN}[OK]${NC} $*"; }
-warn()   { echo "${YEL}[!]${NC} $*"; }
-err()    { echo "${RED}[X]${NC} $*" >&2; }
-header() { echo; echo "${BLD}============================================================${NC}"; echo "${BLD} $*${NC}"; echo "${BLD}============================================================${NC}"; }
+
+# Pick a destination for interactive UI that is always visible.
+if { : >/dev/tty; } 2>/dev/null; then UI=/dev/tty; else UI=/dev/stderr; fi
+
+# Append a de-coloured copy of UI lines to the install log (best effort).
+_log() {
+  { printf '%s ' "$(date '+%F %T')"
+    printf '%b\n' "$*" | sed 's/\x1b\[[0-9;]*m//g'
+  } >>"$INSTALL_LOG" 2>/dev/null || true
+}
+
+say()    { printf '%b\n' "$*" >"$UI"; _log "$*"; }
+info()   { say "  ${BLU}•${NC} $*"; }
+ok()     { say "  ${GRN}✓${NC} $*"; }
+warn()   { say "  ${YEL}▲${NC} $*"; }
+err()    { say "  ${RED}✗${NC} $*"; }
 die()    { err "$*"; exit 1; }
 
-# ask "Prompt" "default"  ->  echoes the chosen value (prompt goes to stderr)
+header() {
+  say ""
+  say "${MAG}${BLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  say "${BLD}  $*${NC}"
+  say "${MAG}${BLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+# read one line from the real terminal (works inside command substitution)
+_readline() { local __v="$1"; IFS= read -r "$__v" 2>/dev/null </dev/tty || printf -v "$__v" '%s' ""; }
+
+# ask "Prompt" "default"  ->  echoes the chosen value
 ask() {
   local prompt="$1" default="${2:-}" reply
   if [[ -n "$default" ]]; then
-    read -rp "$(printf '%s [%s]: ' "$prompt" "$default")" reply
-    echo "${reply:-$default}"
+    printf '  %b➜%b %s %b[%s]%b: ' "$CYN" "$NC" "$prompt" "$DIM" "$default" "$NC" >"$UI"
   else
-    read -rp "$(printf '%s: ' "$prompt")" reply
-    echo "$reply"
+    printf '  %b➜%b %s: ' "$CYN" "$NC" "$prompt" >"$UI"
   fi
+  _readline reply
+  echo "${reply:-$default}"
 }
 
 # confirm "Question" "Y|N"  ->  returns 0 for yes, 1 for no
 confirm() {
   local q="$1" def="${2:-Y}" reply hint
   case "$def" in Y|y) hint="Y/n";; *) hint="y/N";; esac
-  read -rp "$(printf '%s [%s]: ' "$q" "$hint")" reply
+  printf '  %b?%b %s %b[%s]%b: ' "$YEL" "$NC" "$q" "$DIM" "$hint" "$NC" >"$UI"
+  _readline reply
   reply="${reply:-$def}"
   [[ "$reply" =~ ^[Yy] ]]
-}
-
-# gen_password  ->  strong alnum password without relying on openssl being present yet
-gen_password() {
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-24
-  else
-    LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
-  fi
 }
 
 # ask_secret "Prompt"  ->  reads silently, echoes value
 ask_secret() {
   local prompt="$1" reply
-  read -rsp "$(printf '%s: ' "$prompt")" reply; echo >&2
+  printf '  %b➜%b %s: ' "$CYN" "$NC" "$prompt" >"$UI"
+  IFS= read -rs reply 2>/dev/null </dev/tty || reply=""
+  printf '\n' >"$UI"
   echo "$reply"
 }
 
@@ -99,8 +122,55 @@ ask_num() {
   while :; do
     reply=$(ask "$prompt" "$default")
     if [[ "$reply" =~ ^[1-9][0-9]*$ ]]; then echo "$reply"; return 0; fi
-    warn "Please enter a positive whole number." >&2
+    warn "Please enter a positive whole number."
   done
+}
+
+# gen_password  ->  strong alnum password (no dependency on openssl being present yet)
+gen_password() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-24
+  else
+    LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
+  fi
+}
+
+# run_step "Message" cmd [args...]
+# Runs cmd in the background (output -> install log) while animating a spinner,
+# then prints a tick/cross. Returns the command's exit status.
+run_step() {
+  local msg="$1"; shift
+  _log "RUN: $*"
+  if [[ -z "$NC" ]]; then          # no TTY/colour: plain, no animation
+    local rc=0
+    say "  … $msg"
+    "$@" >>"$INSTALL_LOG" 2>&1 || rc=$?
+    (( rc == 0 )) && say "  ✓ $msg" || say "  ✗ $msg (details: $INSTALL_LOG)"
+    return "$rc"
+  fi
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏') i=0 rc=0
+  ( "$@" ) >>"$INSTALL_LOG" 2>&1 &
+  local pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    printf '\r  %b%s%b %s ' "$CYN" "${frames[i]}" "$NC" "$msg" >"$UI"
+    i=$(( (i + 1) % ${#frames[@]} ))
+    sleep 0.1
+  done
+  wait "$pid" || rc=$?
+  if (( rc == 0 )); then
+    printf '\r  %b✓%b %s\033[K\n' "$GRN" "$NC" "$msg" >"$UI"; _log "OK: $msg"
+  else
+    printf '\r  %b✗%b %s\033[K\n' "$RED" "$NC" "$msg" >"$UI"; _log "FAIL($rc): $msg"
+  fi
+  return "$rc"
+}
+
+banner() {
+  say ""
+  say "${CYN}${BLD}  ┌────────────────────────────────────────────────────┐${NC}"
+  say "${CYN}${BLD}  │   KumoMTA  •  Guided Installer for Ubuntu 22.04     │${NC}"
+  say "${CYN}${BLD}  └────────────────────────────────────────────────────┘${NC}"
+  say "  ${DIM}A full install log is written to ${INSTALL_LOG}${NC}"
 }
 
 # ----------------------------------------------------------------------------
@@ -317,10 +387,10 @@ confirm_summary() {
 # ============================================================================
 install_dependencies() {
   header "Installing dependencies"
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y --no-install-recommends curl gnupg ca-certificates openssl ufw dnsutils
-  ok "Base packages installed."
+  run_step "Refreshing apt package lists" apt-get update -y || die "apt-get update failed."
+  run_step "Installing prerequisites (curl, gnupg, openssl, ufw, dnsutils)" \
+    apt-get install -y --no-install-recommends curl gnupg ca-certificates openssl ufw dnsutils \
+    || die "Failed to install base packages."
 }
 
 install_kumomta() {
@@ -332,7 +402,6 @@ install_kumomta() {
 
   local listfile="/etc/apt/sources.list.d/kumomta.list"
 
-  info "Adding the KumoMTA apt repository..."
   curl -fsSL "$KUMO_LIST_URL" -o "$listfile" \
     || die "Could not download apt source list from $KUMO_LIST_URL (check network / provider docs)."
 
@@ -343,14 +412,17 @@ install_kumomta() {
   mkdir -p "$(dirname "$keyring")"
   curl -fsSL "$KUMO_GPG_URL" | gpg --yes --dearmor -o "$keyring" \
     || die "Could not import the KumoMTA signing key from $KUMO_GPG_URL."
+  ok "Added KumoMTA apt repository and signing key."
 
-  apt-get update -y
+  run_step "Updating apt with the KumoMTA repository" apt-get update -y \
+    || die "apt-get update failed after adding the KumoMTA repo."
   if ! apt-cache policy kumomta 2>/dev/null | grep -qE 'Candidate: *[0-9]'; then
     die "The 'kumomta' package was not found after 'apt update'. The repository
 layout may have changed -- see https://docs.kumomta.com/userguide/installation/linux/
 (repo file: $listfile)"
   fi
-  apt-get install -y kumomta
+  run_step "Installing the KumoMTA package" apt-get install -y kumomta \
+    || die "Failed to install the kumomta package."
   ok "KumoMTA package installed."
 }
 
@@ -440,16 +512,18 @@ verify_dns() {
 setup_ssl() {
   [[ "$SETUP_SSL" == "Y" ]] || return 0
   header "SSL certificate (Let's Encrypt)"
-  apt-get install -y certbot
+  run_step "Installing certbot" apt-get install -y certbot || die "Failed to install certbot."
 
   # Free port 80 for standalone challenge if a web server is running.
   systemctl stop nginx apache2 2>/dev/null || true
 
-  if certbot certonly --standalone --non-interactive --agree-tos \
+  if run_step "Requesting certificate for ${PRIMARY_FQDN}" \
+      certbot certonly --standalone --non-interactive --agree-tos \
       -m "$LE_EMAIL" -d "$PRIMARY_FQDN" --preferred-challenges http; then
     ok "Certificate issued for ${PRIMARY_FQDN}."
   else
     warn "certbot failed. Continuing WITHOUT SSL; fix DNS/port 80 and re-run certbot later."
+    say "  ${DIM}(see the certbot output near the end of ${INSTALL_LOG})${NC}"
     SETUP_SSL="N"
     return 0
   fi
@@ -712,15 +786,20 @@ write_all_configs() {
 # ============================================================================
 validate_and_start() {
   header "Validating & starting KumoMTA"
-  if sudo -u "$KUMO_USER" /opt/kumomta/sbin/kumod --policy "$POLICY_DIR/init.lua" --validate; then
+  if run_step "Validating policy (kumod --validate)" \
+       sudo -u "$KUMO_USER" /opt/kumomta/sbin/kumod --policy "$POLICY_DIR/init.lua" --validate; then
     ok "Policy validated."
   else
-    die "Policy validation FAILED. Review $POLICY_DIR/init.lua (compare with the shipped example policy)."
+    err "Policy validation FAILED. Last lines of the log:"
+    tail -n 25 "$INSTALL_LOG" >"$UI" 2>/dev/null || true
+    die "Fix the policy and re-run. Full log: $INSTALL_LOG"
   fi
   systemctl enable kumomta >/dev/null 2>&1 || true
-  systemctl restart kumomta
+  run_step "Starting the KumoMTA service" systemctl restart kumomta || true
   sleep 2
-  if systemctl is-active --quiet kumomta; then ok "KumoMTA is running."; else
+  if systemctl is-active --quiet kumomta; then
+    ok "KumoMTA is running."
+  else
     err "KumoMTA failed to start. Check: journalctl -u kumomta -n 50"
   fi
 }
@@ -849,8 +928,8 @@ print_summary() {
 # MAIN
 # ============================================================================
 main() {
-  header "KumoMTA interactive installer"
   require_root
+  banner
   check_os
   check_resources
   detect_ips
@@ -858,8 +937,6 @@ main() {
   check_conflicts
   gather_inputs
   confirm_summary
-  # Start logging the (non-interactive) installation phase to a file as well.
-  exec > >(tee -a "$INSTALL_LOG") 2>&1
   install_dependencies
   install_kumomta
   system_prep
@@ -872,7 +949,8 @@ main() {
   setup_firewall
   do_test_send
   print_summary
-  header "Done."
+  header "Setup complete"
+  ok "Add the DNS records shown above, confirm your PTRs, then send a test."
 }
 
 main "$@"

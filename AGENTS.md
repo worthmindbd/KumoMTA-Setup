@@ -43,8 +43,10 @@ shellcheck install.sh       # if available; aim for no warnings
 
 For logic-only testing, copy individual functions into a scratch script and
 feed simulated input via `printf '...\n' | func`. The input helpers
-(`ask`, `ask_num`, `confirm`) write prompts to **stderr** and the chosen value
-to **stdout**, so `var=$(ask ...)` captures only the answer.
+(`ask`, `ask_num`, `ask_secret`, `confirm`) write the prompt to the controlling
+terminal (`$UI`, i.e. `/dev/tty`) and read input from `/dev/tty`, while the
+chosen value is echoed to **stdout** — so `var=$(ask ...)` captures only the
+answer and the prompt is always visible even inside command substitution.
 
 ## Script architecture (`install.sh`)
 
@@ -52,9 +54,14 @@ to **stdout**, so `var=$(ask ...)` captures only the answer.
   return non-zero (`... || true`, or wrap in `if`).
 - Tunable constants are grouped near the top (repo URLs, KumoMTA paths, user).
 - Flow is a sequence of small functions orchestrated by `main()`.
-- **Interactive prompts run BEFORE** `main()` redirects output to a tee log
-  (`exec > >(tee -a "$INSTALL_LOG")`). Keep all `read`/prompt logic inside
-  `gather_inputs`/`confirm_summary`, before that redirect, or prompts may buffer.
+- **All UI goes to `$UI` (the terminal), never stdout.** `say`/`info`/`ok`/
+  `warn`/`err`/`header`/`banner` and every prompt write to `$UI` so they are
+  visible even when a value-returning helper runs inside `$(...)`. Do not add
+  a global `exec > >(tee ...)` redirect — it broke prompt visibility and spinner
+  animation. Command output is captured to `$INSTALL_LOG` by `run_step`.
+- **Long-running commands use `run_step "msg" cmd...`** which animates a spinner
+  on `$UI`, logs output, and returns the command's exit code. Always pair with
+  `|| die`, `|| true`, or an `if`.
 - Config files are produced by `write_*` functions using heredocs that
   interpolate the gathered variables.
 
