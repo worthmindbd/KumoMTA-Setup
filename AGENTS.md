@@ -80,6 +80,33 @@ to **stdout**, so `var=$(ask ...)` captures only the answer.
 - **DKIM selector** defaults to `kumo` (record published at
   `kumo._domainkey.<domain>`); a fresh 2048-bit key is generated per install.
 
+## Verified install/config facts (do not regress)
+
+These were validated against the official docs in Apr 2026; changing them risks
+breaking the install or `kumod --validate`:
+
+- **APT repo:** key `https://openrepo.kumomta.com/kumomta-ubuntu-22/public.gpg`
+  dearmored to `/usr/share/keyrings/kumomta.gpg`; sources list downloaded from
+  `https://openrepo.kumomta.com/files/kumomta-ubuntu22.list`. `install_kumomta`
+  also reads the `signed-by=` path from the list and verifies the `kumomta`
+  candidate exists before installing.
+- **`kumod --validate`** is the supported pre-flight check (loads policy, inits
+  the DKIM signer; does not bind listeners).
+- **Shaper MUST be registered:** `local shaper = shaping:setup{...}` does nothing
+  on its own — you must `kumo.on('get_egress_path_config', ...)`. The generated
+  policy handles both function- and object-style returns.
+- **Generated TOML is kept minimal on purpose** to avoid unknown-field errors:
+  - `dkim_data.toml`: only `[domain."x"]` with `selector` + `headers` (helper
+    derives key path `/opt/kumomta/etc/dkim/<domain>/<selector>.key`, defaults
+    RSA sha256, relaxed/relaxed).
+  - `queues.toml`: only `[queue.default]` with `egress_pool`.
+  - `sources.toml`: `[source."x"]` (`source_address`, `ehlo_domain`) +
+    `[pool."send-pool"."x"]` (`weight`).
+  - `shaping.toml`: `["default"]` and per-domain `["gmail.com"]` etc. with
+    `max_message_rate` (`/hr` is a valid period) and `connection_limit`.
+- **Message handler order:** `queue_helper:apply(msg)` then `dkim_signer(msg)`
+  (signing must be last).
+
 ## Conventions & guardrails
 
 - **Never commit secrets.** DKIM private keys and the SMTP password are created
