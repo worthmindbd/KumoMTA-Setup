@@ -1,0 +1,49 @@
+# =============================================================================
+# sources.toml  ->  replaces PowerMTA <virtual-mta> and <virtual-mta-pool>
+# -----------------------------------------------------------------------------
+# Each [source] is one PowerMTA virtual-mta (a sending IP + its HELO/ehlo name).
+# ehlo_domain values match the PTR records configured for each IP.
+# The original IPv6 virtual-mta (pmta-vmta7) is intentionally OMITTED:
+# the new VPS has no IPv6 bound to eth0 (see `ip a`), and IPv6 adds risk
+# with no benefit here. Add it later only if you provision + PTR an IPv6 addr.
+# =============================================================================
+
+[source."pmta-vmta1"]
+source_address = "192.236.240.52"
+ehlo_domain = "smtp.neumannassociatesnews.io"
+
+[source."pmta-vmta2"]
+source_address = "192.236.240.53"
+ehlo_domain = "node1.neumannassociatesnews.io"
+
+[source."pmta-vmta3"]
+source_address = "192.236.240.54"
+ehlo_domain = "node2.neumannassociatesnews.io"
+
+[source."pmta-vmta4"]
+source_address = "192.236.240.55"
+ehlo_domain = "node3.neumannassociatesnews.io"
+
+[source."pmta-vmta5"]
+source_address = "192.236.240.56"
+ehlo_domain = "node4.neumannassociatesnews.io"
+
+[source."pmta-vmta6"]
+source_address = "192.236.240.57"
+ehlo_domain = "node5.neumannassociatesnews.io"
+
+# -----------------------------------------------------------------------------
+# [pool] = PowerMTA <virtual-mta-pool>. Equal weights = round-robin rotation.
+# -----------------------------------------------------------------------------
+[pool."pmta-pool"."pmta-vmta1"]
+weight = 1
+[pool."pmta-pool"."pmta-vmta2"]
+weight = 1
+[pool."pmta-pool"."pmta-vmta3"]
+weight = 1
+[pool."pmta-pool"."pmta-vmta4"]
+weight = 1
+[pool."pmta-pool"."pmta-vmta5"]
+weight = 1
+[pool."pmta-pool"."pmta-vmta6"]
+weight = 1

@@ -1,0 +1,28 @@
+# =============================================================================
+# shaping.toml  ->  replaces PowerMTA per-vMTA <domain> max-msg-rate
+# -----------------------------------------------------------------------------
+# In KumoMTA the rate applies per (source -> destination site) path, which
+# mirrors PowerMTA's per-vMTA, per-domain limit. With 6 sources you get up to
+# 6 x 2500/h toward any single destination domain -- same as the old setup.
+#
+# The shaping helper also loads a community-maintained baseline; entries here
+# are OVERRIDES layered on top. Rate suffixes: /s, /min, /hr.
+# =============================================================================
+
+["default"]
+max_message_rate = "2500/hr"
+connection_limit = 10            # conservative start; tune per provider
+
+# ---- Provider-specific tuning (extend over time as reputation builds) ----
+["gmail.com"]
+connection_limit = 5
+max_message_rate = "2500/hr"
+max_deliveries_per_connection = 50
+
+["yahoo.com"]
+connection_limit = 5
+max_message_rate = "2500/hr"
+
+["outlook.com"]
+connection_limit = 5
+max_message_rate = "2500/hr"

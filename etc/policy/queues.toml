@@ -1,0 +1,15 @@
+# =============================================================================
+# queues.toml  ->  pool assignment + PowerMTA bounce-after
+# -----------------------------------------------------------------------------
+# Assigns all mail to the pmta-pool (PowerMTA default-virtual-mta pmta-pool).
+#
+# NOTE ON max_age: your PowerMTA used `bounce-after 1m` (ONE MINUTE), which
+# bounces anything that hits greylisting or a temporary 4xx almost instantly.
+# That is almost never what you want for bulk mail, so this is set to "1d"
+# (one day) to allow normal retries. To restore the old behaviour, change
+# max_age back to "1m".
+# =============================================================================
+
+[queue.default]
+egress_pool = "pmta-pool"
+max_age = "1d"

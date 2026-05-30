@@ -1,0 +1,16 @@
+# ---- Secrets: NEVER commit these ----
+# DKIM private keys
+*.key
+*.pem
+*.p12
+etc/dkim/**/*.key
+
+# SMTP AUTH / app secrets
+.env
+*.secret
+*.password
+
+# ---- Runtime / local noise ----
+*.log
+*.swp
+.DS_Store
