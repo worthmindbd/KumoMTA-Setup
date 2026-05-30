@@ -881,9 +881,13 @@ ${tls_block}
   }
 end)
 
-kumo.on('smtp_server_auth_plain', function(authcred, conn_meta)
-  return authcred.username == '${SMTP_USER}'
-    and authcred.password == os.getenv('SMTP_NEWS_PASSWORD')
+-- AUTH PLAIN handler. KumoMTA passes FOUR separate args: the authorization id,
+-- the authentication id (the username), the password, and the connection meta.
+-- (KumoMTA only offers AUTH after STARTTLS.) Returning true marks the session
+-- authenticated, which is what permits an authenticated client to relay.
+kumo.on('smtp_server_auth_plain', function(authz, authc, password, conn_meta)
+  return authc == '${SMTP_USER}'
+    and password == os.getenv('SMTP_NEWS_PASSWORD')
 end)
 
 kumo.on('get_listener_domain',
