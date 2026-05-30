@@ -131,7 +131,11 @@ gen_password() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-24
   else
-    LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
+    # Read a FINITE chunk first. Piping the infinite /dev/urandom straight into
+    # `head -c` lets `head` close the pipe, killing `tr` with SIGPIPE (exit 141);
+    # under `set -o pipefail` that would propagate as a failure and abort the
+    # script. Reading a fixed 512 bytes up front avoids the early pipe close.
+    head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-24
   fi
 }
 
@@ -246,8 +250,12 @@ detect_ips() {
   mapfile -t DETECTED < <(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1)
   (( ${#DETECTED[@]} > 0 )) || die "No global IPv4 addresses detected."
   ok "Detected ${#DETECTED[@]} IPv4 address(es): ${DETECTED[*]}"
-  # IPv6 awareness
-  if ip -6 -o addr show scope global 2>/dev/null | grep -q inet6; then
+  # IPv6 awareness. Capture the output and match in-shell rather than piping
+  # into `grep -q`, which (under `set -o pipefail`) can be killed by SIGPIPE and
+  # report a false negative.
+  local v6
+  v6="$(ip -6 -o addr show scope global 2>/dev/null || true)"
+  if [[ "$v6" == *inet6* ]]; then
     info "IPv6 is present, but this installer configures IPv4 sending only"
     info "(stricter provider rules for IPv6 -> not recommended without dedicated PTR)."
   else
@@ -393,6 +401,63 @@ install_dependencies() {
     || die "Failed to install base packages."
 }
 
+# Does apt currently offer a real (versioned) 'kumomta' candidate?
+# NOTE: capture the output and match in-shell -- do NOT pipe `apt-cache policy`
+# into `grep -q`. Under `set -o pipefail`, `grep -q` closes the pipe on its
+# first match, `apt-cache` (which prints a long version table) is killed by
+# SIGPIPE (exit 141), and pipefail propagates that 141 as a FALSE negative.
+# That bug made the installer report "package not found" for a package that was
+# actually present and installable.
+kumo_have_candidate() {
+  local pol
+  pol="$(apt-cache policy kumomta 2>/dev/null)" || return 1
+  [[ "$pol" =~ Candidate:[[:space:]]*[0-9] ]]
+}
+
+# Best-effort: surface WHY apt is not offering the package (key perms,
+# signature, 404s, architecture skips, network).
+kumo_show_repo_diag() {
+  info "Diagnosing the KumoMTA repository..."
+  local diag
+  diag=$(apt-get update 2>&1 \
+    | grep -iE 'kumomta|pkgs\.kumomta|openrepo|NO_PUBKEY|not signed|Permission denied|Failed to fetch|Could not open file|Skipping acquire|support architecture' \
+    || true)
+  if [[ -n "$diag" ]]; then
+    while IFS= read -r line; do warn "$line"; done <<< "$diag"
+  fi
+  return 0
+}
+
+# Fallback installer used when apt's index cannot offer the package despite the
+# repo being reachable. Downloads the newest STABLE kumomta .deb matching the
+# host architecture and installs it via apt so dependencies still resolve.
+kumo_install_via_deb() {
+  local base="https://pkgs.kumomta.com/kumomta-ubuntu-22-stable"
+  local arch pkgs fname url tmp
+  arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+  pkgs="$(curl -fsSL "$base/dists/stable/main/binary-any/Packages" 2>/dev/null)" \
+    || { err "Could not download the package index from $base"; return 1; }
+  # The Packages file lists versions in ascending order; keep the LAST (newest)
+  # 'kumomta' entry whose Architecture matches this host.
+  fname="$(printf '%s\n' "$pkgs" | awk -v arch="$arch" '
+    /^Package:[[:space:]]*kumomta[[:space:]]*$/ { inpkg=1; a=""; next }
+    /^Package:/ { inpkg=0 }
+    inpkg && /^Architecture:/ { a=$2 }
+    inpkg && /^Filename:/ { if (a==arch) print $2 }
+  ' | tail -1)"
+  [[ -n "$fname" ]] || { err "No stable kumomta .deb found for architecture '$arch'."; return 1; }
+  url="$base/$fname"
+  tmp="$(mktemp --suffix=.deb)"
+  run_step "Downloading kumomta package ($(basename "$fname"))" \
+    curl -fL --retry 3 -o "$tmp" "$url" \
+    || { rm -f "$tmp"; err "Download failed: $url"; return 1; }
+  run_step "Installing kumomta from the downloaded package" \
+    apt-get install -y "$tmp" \
+    || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+  return 0
+}
+
 install_kumomta() {
   header "Installing KumoMTA"
   if command -v kumod >/dev/null 2>&1 || [[ -x /opt/kumomta/sbin/kumod ]]; then
@@ -425,28 +490,44 @@ install_kumomta() {
   chmod 755 "$(dirname "$keyring")" 2>/dev/null || true
   ok "Added KumoMTA apt repository and signing key (keyring readable: 644)."
 
+  # ---- Refresh apt and ensure the 'kumomta' package becomes available --------
+  # The stable package is published under a 'binary-any' index (the .list uses
+  # arch=any). On a clean machine 'apt update' picks it up immediately, but a
+  # box that has seen earlier/aborted attempts can be left with stale apt list
+  # state where the repo InRelease is cached ("Hit") yet no candidate is offered
+  # (exactly the failure being fixed). We therefore try, in order:
+  #   1) a normal update,
+  #   2) a CLEAN re-acquire of just the KumoMTA indices,
+  #   3) a direct .deb install straight from the (reachable) stable repo.
   run_step "Updating apt with the KumoMTA repository" apt-get update -y \
     || die "apt-get update failed after adding the KumoMTA repo."
-  if ! apt-cache policy kumomta 2>/dev/null | grep -qE 'Candidate: *[0-9]'; then
-    err "The 'kumomta' package was not found after 'apt update'."
-    # Surface WHY the repo was skipped instead of failing blindly. Re-run update
-    # with visible output filtered to the KumoMTA repo (key perms, signature,
-    # or network issues all show up here).
-    info "Diagnosing why the KumoMTA repository was skipped..."
-    local diag
-    diag=$(apt-get update 2>&1 \
-      | grep -iE 'kumomta|pkgs\.kumomta|openrepo|NO_PUBKEY|not signed|Permission denied|Failed to fetch|Could not open file' \
-      || true)
-    if [[ -n "$diag" ]]; then
-      while IFS= read -r line; do warn "$line"; done <<< "$diag"
-    fi
-    warn "Signing key: $(ls -ld "$keyring" 2>/dev/null || echo "MISSING ($keyring)")"
-    die "The KumoMTA repo was added but apt did not offer the package.
-Check $listfile and https://docs.kumomta.com/userguide/installation/linux/"
+
+  if ! kumo_have_candidate; then
+    warn "kumomta not offered yet -- clearing stale apt cache for the KumoMTA repo and retrying."
+    rm -f /var/lib/apt/lists/*kumomta* /var/lib/apt/lists/partial/*kumomta* 2>/dev/null || true
+    run_step "Re-fetching the KumoMTA package index" apt-get update -y || true
   fi
-  run_step "Installing the KumoMTA package" apt-get install -y kumomta \
-    || die "Failed to install the kumomta package."
-  ok "KumoMTA package installed."
+
+  if kumo_have_candidate; then
+    if run_step "Installing the KumoMTA package" apt-get install -y kumomta; then
+      ok "KumoMTA package installed."
+      return
+    fi
+    warn "apt offered the package but the install failed; trying a direct .deb install."
+  else
+    warn "apt still does not offer 'kumomta'; falling back to a direct .deb install."
+    kumo_show_repo_diag
+  fi
+
+  # ---- Fallback: install the .deb directly from the repo ---------------------
+  if kumo_install_via_deb; then
+    ok "KumoMTA package installed (direct .deb from the stable repo)."
+    return
+  fi
+
+  err "The 'kumomta' package could not be installed via apt or direct download."
+  warn "Signing key: $(ls -ld "$keyring" 2>/dev/null || echo "MISSING ($keyring)")"
+  die "Check $listfile and https://docs.kumomta.com/userguide/installation/linux/"
 }
 
 system_prep() {
@@ -875,8 +956,16 @@ do_test_send() {
   info "Waiting ~10s for a delivery attempt, then showing recent log activity..."
   sleep 10
   # KumoMTA log segments may be zstd/gzip/plain -- try each, grep for the recipient.
-  local newest
-  newest=$(find "$LOG_DIR" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+  # Capture+parse in-shell instead of `... | sort | head -1`, since `head`
+  # closing the pipe can kill `sort` with SIGPIPE (exit 141) and, under
+  # `set -o pipefail`, abort the whole script during this final step.
+  local newest logs
+  logs="$(find "$LOG_DIR" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr || true)"
+  newest=""
+  if [[ -n "$logs" ]]; then
+    newest="${logs%%$'\n'*}"   # first (newest) line: "<mtime> <path>"
+    newest="${newest#* }"      # strip the leading mtime field
+  fi
   if [[ -n "$newest" && -f "$newest" ]]; then
     info "Newest log segment: $newest"
     { zstdcat "$newest" 2>/dev/null || zcat "$newest" 2>/dev/null || cat "$newest" 2>/dev/null; } \
