@@ -10,7 +10,8 @@
 # PREREQUISITES (see README.md):
 #   * A records for each IP's hostname (smtp, mta1, mta2, ...) ALREADY created
 #   * PTR / reverse DNS for each IP set at your VPS provider
-#   * Ports 25, 587, 465 (and 80 for SSL) open / unblocked by your provider
+#   * Ports 25 and 587 (plus 80 for SSL) open / unblocked by your provider
+#     (KumoMTA uses STARTTLS only -- no implicit-TLS/465 listener)
 #
 #   sudo bash scripts/install.sh
 #
@@ -110,6 +111,7 @@ DAILY_LIMIT=""; PER_IP_HOURLY=""; WARMUP="N"; START_RATE=""
 LE_EMAIL=""; SETUP_SSL="Y"
 DKIM_SELECTOR="default"
 DMARC_RUA=""; SETUP_FW="Y"
+TEST_SEND="N"; TEST_RCPT=""
 
 # ============================================================================
 # 1. PREFLIGHT CHECKS
@@ -271,7 +273,17 @@ gather_inputs() {
   # --- DMARC + firewall ---
   echo
   DMARC_RUA=$(ask "DMARC aggregate-report email (rua)" "dmarc@${MAIN_DOMAIN}")
-  if confirm "Configure UFW firewall (allow SSH, 25, 80, 443, 587, 465)?" "Y"; then SETUP_FW="Y"; else SETUP_FW="N"; fi
+  if confirm "Configure UFW firewall (allow SSH, 25, 80, 587)?" "Y"; then SETUP_FW="Y"; else SETUP_FW="N"; fi
+
+  # --- post-install test send ---
+  echo
+  if confirm "Send a test email after install (to confirm delivery)?" "Y"; then
+    TEST_SEND="Y"
+    while :; do
+      TEST_RCPT=$(ask "  Test recipient address (use an inbox you control)")
+      [[ "$TEST_RCPT" == *@*.* ]] && break || warn "Enter a valid email address."
+    done
+  fi
 }
 
 confirm_summary() {
@@ -290,6 +302,7 @@ confirm_summary() {
   echo "  Let's Encrypt SSL  : $SETUP_SSL"
   echo "  DMARC rua          : $DMARC_RUA"
   echo "  Configure firewall : $SETUP_FW"
+  if [[ "$TEST_SEND" == "Y" ]]; then echo "  Post-install test  : Y -> $TEST_RCPT"; else echo "  Post-install test  : N"; fi
   echo
   confirm "Proceed with installation?" "Y" || die "Aborted by user."
 }
@@ -623,6 +636,9 @@ kumo.on('init', function()
 ${tls_block}
   }
 
+  -- NOTE: KumoMTA supports STARTTLS only (not implicit TLS / SMTPS), so there
+  -- is no listener on 465; injectors should submit on 587 with STARTTLS.
+
   kumo.start_http_listener {
     listen = '127.0.0.1:8000',
     trusted_hosts = { '127.0.0.1', '::1' },
@@ -685,13 +701,61 @@ setup_firewall() {
   [[ "$SETUP_FW" == "Y" ]] || return 0
   header "Firewall (UFW)"
   ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null
-  ufw allow 25/tcp  >/dev/null
-  ufw allow 80/tcp  >/dev/null
-  ufw allow 443/tcp >/dev/null
-  ufw allow 587/tcp >/dev/null
-  ufw allow 465/tcp >/dev/null
+  ufw allow 25/tcp  >/dev/null   # SMTP (inbound bounces; outbound delivery)
+  ufw allow 80/tcp  >/dev/null   # Let's Encrypt issuance + renewal
+  ufw allow 587/tcp >/dev/null   # submission (STARTTLS)
   yes | ufw enable >/dev/null 2>&1 || true
-  ok "UFW configured (SSH, 25, 80, 443, 587, 465 allowed)."
+  ok "UFW configured (allowed: SSH, 25, 80, 587)."
+  info "Note: KumoMTA supports STARTTLS only (no implicit-TLS/465), so submit on 587."
+}
+
+# ============================================================================
+# 8b. POST-INSTALL TEST SEND  (HTTP injection API + log tail)
+# ============================================================================
+do_test_send() {
+  [[ "$TEST_SEND" == "Y" ]] || return 0
+  header "Post-install test send -> ${TEST_RCPT}"
+  command -v curl >/dev/null 2>&1 || { warn "curl not found; skipping test send."; return 0; }
+
+  local sender="postmaster@${MAIN_DOMAIN}"
+  local subj="KumoMTA test $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local body="KumoMTA post-install test from ${PRIMARY_FQDN}. If you received this, injection + delivery work."
+  # Build JSON; \n inside content is a literal backslash-n (a JSON newline escape).
+  local nl='\n'
+  local content="Subject: ${subj}${nl}From: ${sender}${nl}To: ${TEST_RCPT}${nl}${nl}${body}"
+  local payload="{\"envelope_sender\":\"${sender}\",\"recipients\":[{\"email\":\"${TEST_RCPT}\"}],\"content\":\"${content}\"}"
+
+  local respfile code
+  respfile=$(mktemp)
+  info "Injecting via http://127.0.0.1:8000/api/inject/v1 ..."
+  code=$(curl -s -o "$respfile" -w '%{http_code}' \
+        -H 'Content-Type: application/json' \
+        'http://127.0.0.1:8000/api/inject/v1' -d "$payload" 2>/dev/null || echo "000")
+
+  if [[ "$code" == "200" ]]; then
+    ok "Injection accepted (HTTP 200): $(cat "$respfile")"
+  else
+    warn "Injection failed (HTTP ${code}): $(cat "$respfile" 2>/dev/null)"
+    warn "Inspect with: journalctl -u kumomta -n 50"
+    rm -f "$respfile"; return 0
+  fi
+  rm -f "$respfile"
+
+  info "Waiting ~10s for a delivery attempt, then showing recent log activity..."
+  sleep 10
+  # KumoMTA log segments may be zstd/gzip/plain -- try each, grep for the recipient.
+  local newest
+  newest=$(find "$LOG_DIR" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+  if [[ -n "$newest" && -f "$newest" ]]; then
+    info "Newest log segment: $newest"
+    { zstdcat "$newest" 2>/dev/null || zcat "$newest" 2>/dev/null || cat "$newest" 2>/dev/null; } \
+      | grep -a -iE "${TEST_RCPT}|Delivery|Reception|Bounce|TransientFailure" | tail -8 || true
+  else
+    info "No log segment flushed yet (this is normal -- logs buffer briefly)."
+  fi
+  echo
+  info "Follow live results with:   journalctl -u kumomta -f"
+  info "Then check the recipient inbox (and spam folder) for: ${subj}"
 }
 
 # ============================================================================
@@ -725,8 +789,8 @@ print_summary() {
     echo "## SMTP CREDENTIALS (for MailWizz / Listmonk)"
     echo "  Server / Host : ${PRIMARY_FQDN}"
     if [[ "$SETUP_SSL" == "Y" ]]; then
-      echo "  Port          : 587  (STARTTLS)   |  also try 465 if your version supports implicit TLS"
-      echo "  Encryption    : STARTTLS / TLS"
+      echo "  Port          : 587  (STARTTLS)"
+      echo "  Encryption    : STARTTLS   (KumoMTA does NOT support implicit TLS / 465)"
     else
       echo "  Port          : 587  (configure TLS before production!)"
       echo "  Encryption    : (none yet -- SSL was skipped)"
@@ -777,6 +841,7 @@ main() {
   write_all_configs
   validate_and_start
   setup_firewall
+  do_test_send
   print_summary
   header "Done."
 }

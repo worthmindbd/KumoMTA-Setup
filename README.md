@@ -9,7 +9,7 @@ credentials you need.
 ```bash
 git clone https://github.com/worthmindbd/KumoMTA-Setup.git
 cd KumoMTA-Setup
-sudo bash scripts/install.sh
+sudo bash install.sh
 ```
 
 ---
@@ -26,12 +26,32 @@ sudo bash scripts/install.sh
 |------|-----------|---------|
 | **25**  | outbound **and** inbound | mail delivery + receiving bounces |
 | **587** | inbound | mail submission (STARTTLS) — your app injects here |
-| **465** | inbound | mail submission (implicit TLS) |
-| **80**  | inbound | temporary, only for Let's Encrypt SSL issuance |
+| **80**  | inbound | temporary, for Let's Encrypt SSL issuance + renewal |
+| **22**  | inbound | SSH (so the firewall doesn't lock you out) |
 
 > Port **25 is blocked by default** on most VPS providers. Open a support ticket
 > to unblock outbound 25, or remote delivery will fail with connection timeouts.
-> The installer also opens 25/587/465/80/443 in UFW for you.
+>
+> **Port 465 (implicit TLS / SMTPS) is intentionally not used** — KumoMTA
+> supports **STARTTLS only**, so injection happens on **587**.
+
+### Firewall
+
+Two layers may apply — make sure required ports are allowed on **both**:
+
+1. **Your VPS provider's firewall / security group** (RackNerd panel, cloud
+   security group, etc.) — allow inbound `22, 25, 80, 587` and outbound `25`.
+   This is outside the server and the script cannot change it.
+2. **The server's own firewall (UFW)** — the installer configures this for you
+   (allows SSH, 25, 80, 587 and enables UFW). To do it manually:
+
+   ```bash
+   sudo ufw allow OpenSSH      # 22
+   sudo ufw allow 25/tcp       # SMTP (in + out)
+   sudo ufw allow 80/tcp       # Let's Encrypt
+   sudo ufw allow 587/tcp      # submission (STARTTLS)
+   sudo ufw enable
+   ```
 
 ### How many IPs do you have?
 Each sending IP gets **one hostname** (used as the HELO name + reverse DNS).
@@ -83,7 +103,7 @@ will show ready-to-paste records:
 - **DMARC** — `TXT` at `_dmarc.<domain>` (starts in monitor mode `p=none`)
 - **MX** *(optional)* — to receive out-of-band bounces
 
-…plus your **SMTP credentials** (host, port 587/465, username, password).
+…plus your **SMTP credentials** (host, port 587, username, password).
 
 ---
 
@@ -102,6 +122,8 @@ will show ready-to-paste records:
    all policy files, runs `kumod --validate`, and starts the service.
 5. **Prints + saves** all post-install DNS records and SMTP credentials to
    `/root/kumomta-install-summary.txt` (chmod 600).
+6. **Optional test send** — injects a message via the local HTTP API to a
+   recipient you choose, then tails the log so you can confirm delivery.
 
 ### Design notes
 - **"Daily limit" vs rate:** KumoMTA throttles per `(IP → receiving provider)`,
@@ -113,8 +135,8 @@ will show ready-to-paste records:
   restarts the service.
 - **Secrets:** the SMTP password is stored in `/opt/kumomta/etc/secrets.env`
   (chmod 600) and injected via a systemd `EnvironmentFile` — never in git.
-- **Port 465 (implicit TLS):** listeners use 587 + STARTTLS; verify implicit-TLS
-  support in your installed KumoMTA version if you specifically need 465.
+- **No implicit TLS (465):** KumoMTA supports STARTTLS only, so the installer
+  binds listeners on **25** and **587** (STARTTLS) and does not use 465.
 
 ---
 
