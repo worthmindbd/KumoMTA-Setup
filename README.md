@@ -166,6 +166,27 @@ cat /root/kumomta-install-summary.txt
 > Generated config lives in `/opt/kumomta/etc/policy/`. Re-running the installer
 > backs up any existing policy before regenerating.
 
+### Enabling SSL later (if certbot was skipped)
+
+If the installer reported **"Continuing WITHOUT SSL"**, the Let's Encrypt
+challenge couldn't reach the server on port 80 (usually the VPS provider's
+firewall, or DNS not yet pointing at the box). Everything else still works —
+KumoMTA runs without TLS — but you'll want STARTTLS on 587 before production.
+
+Once **inbound TCP/80** is open and `smtp.<domain>` resolves to this server,
+issue the cert and wire it into KumoMTA with the helper (safe to re-run):
+
+```bash
+sudo bash enable-ssl.sh                       # auto-detects hostname, asks for email
+# or pass them explicitly:
+sudo bash enable-ssl.sh smtp.example.com you@example.com
+```
+
+It installs certbot (from EPEL) if needed, opens port 80 in firewalld, obtains
+the certificate, deploys it to `/opt/kumomta/etc/tls/`, enables STARTTLS on the
+`:587` listener in `init.lua`, installs the renewal hook, validates, and
+restarts KumoMTA.
+
 ---
 
 ## License

@@ -635,6 +635,17 @@ setup_ssl() {
     return 0
   fi
 
+  # Let's Encrypt's HTTP-01 challenge must reach this host on inbound TCP/80.
+  # Rocky enables firewalld by default (the public zone blocks 80), and our
+  # firewall step runs LATER, so open 80 right now -- otherwise the standalone
+  # challenge times out and SSL gets skipped. Runtime add takes effect
+  # immediately (no reload); the permanent add survives reboots.
+  if systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --add-port=80/tcp >/dev/null 2>&1 || true
+    firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1 || true
+    info "Opened TCP/80 in firewalld for the Let's Encrypt challenge."
+  fi
+
   # Free port 80 for the standalone challenge if a web server is running.
   systemctl stop nginx httpd 2>/dev/null || true
 
@@ -643,7 +654,9 @@ setup_ssl() {
       -m "$LE_EMAIL" -d "$PRIMARY_FQDN" --preferred-challenges http; then
     ok "Certificate issued for ${PRIMARY_FQDN}."
   else
-    warn "certbot failed. Continuing WITHOUT SSL; fix DNS/port 80 and re-run certbot later."
+    warn "certbot failed. Continuing WITHOUT SSL."
+    warn "Most common cause: inbound TCP/80 not reachable (provider firewall)."
+    warn "Once port 80 is open, enable SSL anytime with:  sudo bash enable-ssl.sh"
     say "  ${DIM}(see the certbot output near the end of ${INSTALL_LOG})${NC}"
     SETUP_SSL="N"
     return 0
