@@ -22,6 +22,8 @@ install.sh    The whole installer (Bash). Edit this for any behavior change.
 README.md     End-user docs: requirements, ports, firewall, DNS workflow, usage.
 AGENTS.md     This file.
 CLAUDE.md     Symlink -> AGENTS.md (so Claude Code reads the same guidance).
+LICENSE       MIT license.
+.github/workflows/ci.yml   CI: bash -n + ShellCheck on push / PR.
 ```
 
 There are intentionally **no config files in the repo**. KumoMTA's policy files

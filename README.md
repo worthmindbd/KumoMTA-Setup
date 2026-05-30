@@ -1,5 +1,9 @@
 # KumoMTA Clean Installer
 
+[![CI](https://github.com/worthmindbd/KumoMTA-Setup/actions/workflows/ci.yml/badge.svg)](https://github.com/worthmindbd/KumoMTA-Setup/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Ubuntu 22.04 LTS](https://img.shields.io/badge/Ubuntu-22.04%20LTS-E95420?logo=ubuntu&logoColor=white)
+
 A single interactive script that installs and configures a **fresh KumoMTA**
 outbound email server on **Ubuntu 22.04 LTS** — system checks, KumoMTA install,
 OS tuning, Let's Encrypt SSL, DKIM, traffic shaping, validation, and service
@@ -157,3 +161,9 @@ cat /root/kumomta-install-summary.txt
 
 > Generated config lives in `/opt/kumomta/etc/policy/`. Re-running the installer
 > backs up any existing policy before regenerating.
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).
