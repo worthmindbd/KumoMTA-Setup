@@ -77,6 +77,8 @@ to **stdout**, so `var=$(ask ...)` captures only the answer.
   breaks must be JSON `\n` escapes (literal backslash-n in the shell string).
 - **Subdomain / HELO naming:** 1st IP → `smtp`, then `mta1`, `mta2`, … (`mtaN-1`
   for the Nth IP). Each must have a matching forward A record and PTR.
+- **DKIM selector** defaults to `kumo` (record published at
+  `kumo._domainkey.<domain>`); a fresh 2048-bit key is generated per install.
 
 ## Conventions & guardrails
 

@@ -13,7 +13,7 @@
 #   * Ports 25 and 587 (plus 80 for SSL) open / unblocked by your provider
 #     (KumoMTA uses STARTTLS only -- no implicit-TLS/465 listener)
 #
-#   sudo bash scripts/install.sh
+#   sudo bash install.sh
 #
 # Re-runnable: existing config is backed up before being overwritten.
 # =============================================================================
@@ -109,7 +109,7 @@ declare -a IPS=() SUBS=() FQDNS=()
 SMTP_USER=""; SMTP_PASS=""
 DAILY_LIMIT=""; PER_IP_HOURLY=""; WARMUP="N"; START_RATE=""
 LE_EMAIL=""; SETUP_SSL="Y"
-DKIM_SELECTOR="default"
+DKIM_SELECTOR="kumo"
 DMARC_RUA=""; SETUP_FW="Y"
 TEST_SEND="N"; TEST_RCPT=""
 
@@ -120,7 +120,10 @@ require_root() { [[ $EUID -eq 0 ]] || die "Please run as root (sudo bash $0)"; }
 
 check_os() {
   header "System requirement checks"
-  if [[ -r /etc/os-release ]]; then . /etc/os-release; fi
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+  fi
   if [[ "${ID:-}" == "ubuntu" && "${VERSION_ID:-}" == "22.04" ]]; then
     ok "OS: Ubuntu 22.04 LTS"
   else
@@ -255,7 +258,7 @@ gather_inputs() {
 
   # --- DKIM ---
   echo
-  DKIM_SELECTOR=$(ask "DKIM selector" "default")
+  DKIM_SELECTOR=$(ask "DKIM selector" "kumo")
 
   # --- SSL ---
   echo
@@ -492,7 +495,8 @@ setup_dkim() {
 # ============================================================================
 backup_existing() {
   if [[ -f "$POLICY_DIR/init.lua" ]]; then
-    local bk="$POLICY_DIR/backup-$(date +%Y%m%d-%H%M%S)"
+    local bk
+    bk="$POLICY_DIR/backup-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$bk"; cp -a "$POLICY_DIR"/*.toml "$POLICY_DIR"/init.lua "$bk"/ 2>/dev/null || true
     ok "Backed up existing policy to $bk"
   fi
@@ -718,7 +722,8 @@ do_test_send() {
   command -v curl >/dev/null 2>&1 || { warn "curl not found; skipping test send."; return 0; }
 
   local sender="postmaster@${MAIN_DOMAIN}"
-  local subj="KumoMTA test $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local subj
+  subj="KumoMTA test $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local body="KumoMTA post-install test from ${PRIMARY_FQDN}. If you received this, injection + delivery work."
   # Build JSON; \n inside content is a literal backslash-n (a JSON newline escape).
   local nl='\n'

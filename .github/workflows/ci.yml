@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  lint:
+  shell-lint:
     name: Shell lint
     runs-on: ubuntu-latest
     steps:
@@ -25,5 +25,17 @@ jobs:
       - name: ShellCheck (full report, informational)
         run: shellcheck install.sh || true
 
-      - name: ShellCheck (gate on errors)
-        run: shellcheck --severity=error install.sh
+      - name: ShellCheck (gate on warnings and errors)
+        run: shellcheck --severity=warning install.sh
+
+  actionlint:
+    name: Workflow lint (actionlint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color

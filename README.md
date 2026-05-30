@@ -103,7 +103,8 @@ When the install finishes, the terminal (and `/root/kumomta-install-summary.txt`
 will show ready-to-paste records:
 
 - **SPF**  — `TXT` on your domain authorizing all your sending IPs
-- **DKIM** — `TXT` at `<selector>._domainkey.<domain>` (a fresh 2048-bit key)
+- **DKIM** — `TXT` at `<selector>._domainkey.<domain>` (a fresh 2048-bit key;
+  default selector is `kumo`, e.g. `kumo._domainkey.example.com`)
 - **DMARC** — `TXT` at `_dmarc.<domain>` (starts in monitor mode `p=none`)
 - **MX** *(optional)* — to receive out-of-band bounces
 
