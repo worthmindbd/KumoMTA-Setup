@@ -410,16 +410,39 @@ install_kumomta() {
   keyring=$(grep -oE 'signed-by=[^] ]+' "$listfile" | head -1 | cut -d= -f2- || true)
   keyring="${keyring:-$KUMO_KEYRING}"
   mkdir -p "$(dirname "$keyring")"
+
+  # Dearmor the signing key. IMPORTANT: gpg honours the current umask when it
+  # creates the keyring, so on hardened images (umask 027/077) it can land as
+  # mode 0600/0640 owned by root. 'apt update' fetches as the unprivileged
+  # "_apt" user, which then CANNOT read the key -> apt SILENTLY skips the signed
+  # repo (only a warning) and the package "disappears", which is exactly the
+  # failure being fixed here. Force world-readable perms, matching the official
+  # KumoMTA install docs (https://docs.kumomta.com/userguide/installation/linux/).
   curl -fsSL "$KUMO_GPG_URL" | gpg --yes --dearmor -o "$keyring" \
     || die "Could not import the KumoMTA signing key from $KUMO_GPG_URL."
-  ok "Added KumoMTA apt repository and signing key."
+  [[ -s "$keyring" ]] || die "The KumoMTA signing key at $keyring is empty (download failed?)."
+  chmod 644 "$keyring"
+  chmod 755 "$(dirname "$keyring")" 2>/dev/null || true
+  ok "Added KumoMTA apt repository and signing key (keyring readable: 644)."
 
   run_step "Updating apt with the KumoMTA repository" apt-get update -y \
     || die "apt-get update failed after adding the KumoMTA repo."
   if ! apt-cache policy kumomta 2>/dev/null | grep -qE 'Candidate: *[0-9]'; then
-    die "The 'kumomta' package was not found after 'apt update'. The repository
-layout may have changed -- see https://docs.kumomta.com/userguide/installation/linux/
-(repo file: $listfile)"
+    err "The 'kumomta' package was not found after 'apt update'."
+    # Surface WHY the repo was skipped instead of failing blindly. Re-run update
+    # with visible output filtered to the KumoMTA repo (key perms, signature,
+    # or network issues all show up here).
+    info "Diagnosing why the KumoMTA repository was skipped..."
+    local diag
+    diag=$(apt-get update 2>&1 \
+      | grep -iE 'kumomta|pkgs\.kumomta|openrepo|NO_PUBKEY|not signed|Permission denied|Failed to fetch|Could not open file' \
+      || true)
+    if [[ -n "$diag" ]]; then
+      while IFS= read -r line; do warn "$line"; done <<< "$diag"
+    fi
+    warn "Signing key: $(ls -ld "$keyring" 2>/dev/null || echo "MISSING ($keyring)")"
+    die "The KumoMTA repo was added but apt did not offer the package.
+Check $listfile and https://docs.kumomta.com/userguide/installation/linux/"
   fi
   run_step "Installing the KumoMTA package" apt-get install -y kumomta \
     || die "Failed to install the kumomta package."
