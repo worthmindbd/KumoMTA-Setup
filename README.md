@@ -14,6 +14,9 @@ KumoMTA configuration migrated from a PowerMTA setup, for a RackNerd Ubuntu
 ## Repository layout
 
 ```
+scripts/
+  install.sh             Interactive installer (RECOMMENDED) — see below
+  system-prep.sh         Standalone OS tuning only (subset of install.sh)
 etc/
   policy/
     init.lua               Main policy — wires the helpers together
@@ -25,9 +28,52 @@ etc/
   dkim/
     neumannassociatesnews.io/
       pmta.key             <- YOU place this (git-ignored). Reuse old PMTA key!
-scripts/
-  system-prep.sh           One-time OS tuning (sysctl, ulimits, dirs, hostname)
 ```
+
+> The static files under `etc/policy/` are the **hand-tuned reference** for the
+> existing `neumannassociatesnews.io` migration. `scripts/install.sh` instead
+> **generates** equivalent files dynamically from your answers — use whichever
+> fits: the installer for a fresh guided setup, or the static files to deploy
+> the reviewed migration config directly.
+
+## Quick start — interactive installer
+
+```bash
+git clone https://github.com/worthmindbd/KumoMTA-Setup.git
+cd KumoMTA-Setup
+sudo bash scripts/install.sh
+```
+
+The installer will:
+
+1. **Check the system** — OS, CPU/RAM/disk, detect IPv4s, probe outbound port 25,
+   and offer to disable a conflicting MTA (postfix/exim).
+2. **Ask configuration** — main (From) domain, which IPs to use, a HELO subdomain
+   per IP (auto `smtp`, `mta1`, `mta2`, … or custom), SMTP AUTH user + password
+   (auto-generated), daily volume + per-IP/provider hourly cap, optional warmup,
+   DKIM (generate new or reuse an existing key), Let's Encrypt email, DMARC rua,
+   and firewall.
+3. **Print DNS early** and pause so you can create the A records (required before
+   SSL issuance) and set PTRs.
+4. **Install KumoMTA**, tune the OS (sysctl/ulimits/hostname), obtain a
+   **Let's Encrypt** cert (with an auto-reload renewal hook), set up **DKIM**,
+   generate all policy files, **validate**, and start the service.
+5. **Print and save** all DNS entries + SMTP credentials to
+   `/root/kumomta-install-summary.txt` (chmod 600).
+
+### Notes on the installer's design
+
+- **"Daily limit" vs rate:** KumoMTA throttles per `(IP -> receiving provider)`,
+  not as one global daily counter. The installer uses your daily number for
+  capacity/warmup advice, and writes a per-IP/provider hourly cap into
+  `shaping.toml` (that's the limit that protects deliverability).
+- **TLS for `kumod`:** Let's Encrypt private keys are root-only, so certs are
+  copied into `/opt/kumomta/etc/tls/` owned by `kumod`; the renewal deploy-hook
+  re-copies and restarts the service.
+- **Secrets:** the SMTP password is stored in `/opt/kumomta/etc/secrets.env`
+  (chmod 600) and injected via a systemd `EnvironmentFile` — never in git.
+- **Port 465 (implicit TLS):** the listeners use 587 + STARTTLS; verify implicit
+  TLS support in your installed version if you specifically need 465.
 
 ## PowerMTA → KumoMTA mapping
 
@@ -43,7 +89,10 @@ scripts/
 | `always-allow-relaying no` | `relay_hosts` / `relay_to = false` |
 | `acct.csv` / `diag.csv` | JSON logs via `configure_local_logs` |
 
-## Deploy steps (on the VPS, as root)
+## Manual deploy (static reference files)
+
+> Use this path only if you want to deploy the reviewed migration config
+> directly instead of running `scripts/install.sh`.
 
 ```bash
 # 0. Install KumoMTA from the official APT repo first
