@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-# KumoMTA clean-install setup  (Ubuntu 22.04 LTS)
+# KumoMTA clean-install setup  (Rocky Linux 8 / 9)
 # -----------------------------------------------------------------------------
 # Interactive installer for a FRESH KumoMTA outbound sending server.
 # Guided setup: system checks -> interactive config -> install KumoMTA ->
 # SSL (Let's Encrypt) -> DKIM -> policy generation -> validate -> start.
 # At the end it prints (and saves) ALL DNS entries and SMTP credentials.
+#
+# Targets Rocky Linux 8 and 9 (and binary-compatible EL8/EL9 rebuilds such as
+# AlmaLinux / RHEL / CentOS Stream). KumoMTA officially recommends Rocky Linux.
 #
 # PREREQUISITES (see README.md):
 #   * A records for each IP's hostname (smtp, mta1, mta2, ...) ALREADY created
@@ -20,14 +23,17 @@
 set -euo pipefail
 
 # ----------------------------------------------------------------------------
-# Tunable repo locations (verify against https://docs.kumomta.com if install
-# fails -- these are the current official endpoints).
-# ----------------------------------------------------------------------------
-# Official KumoMTA apt repo endpoints (Ubuntu 22.04 "jammy").
+# Official KumoMTA dnf/yum repo definition (Rocky Linux 8/9).
 # Verified against https://docs.kumomta.com/userguide/installation/linux/
-KUMO_GPG_URL="https://openrepo.kumomta.com/kumomta-ubuntu-22/public.gpg"
-KUMO_LIST_URL="https://openrepo.kumomta.com/files/kumomta-ubuntu22.list"
-KUMO_KEYRING="/usr/share/keyrings/kumomta.gpg"
+# The .repo file uses $releasever, so the same file works on EL8 and EL9.
+# It defines two repos: "kumomta-stable" (the kumomta package, what we install)
+# and "kumomta-dev" (the kumomta-dev package, pre-release/testing only).
+# ----------------------------------------------------------------------------
+KUMO_REPO_URL="https://openrepo.kumomta.com/files/kumomta-rocky.repo"
+KUMO_REPO_FILE="/etc/yum.repos.d/kumomta.repo"
+# Base of the stable RPM repo (used only by the direct-.rpm fallback). The
+# ${rhel} placeholder is filled in at runtime from `rpm -E %rhel`.
+KUMO_PKG_BASE_TMPL="https://pkgs.kumomta.com/kumomta-rockylinux-%s-stable"
 
 KUMO_ETC="/opt/kumomta/etc"
 POLICY_DIR="$KUMO_ETC/policy"
@@ -40,6 +46,9 @@ SUMMARY_FILE="/root/kumomta-install-summary.txt"
 INSTALL_LOG="/var/log/kumomta-install.log"
 KUMO_USER="kumod"
 
+# Filled in by check_os(): the EL major version (8 or 9).
+EL_VER=""
+
 # ----------------------------------------------------------------------------
 # Styling + terminal-safe IO
 #
@@ -48,8 +57,6 @@ KUMO_USER="kumod"
 # is written to the controlling terminal ($UI) and never to stdout. This is
 # what makes prompts reliably visible.
 # ----------------------------------------------------------------------------
-export DEBIAN_FRONTEND=noninteractive
-
 if [[ -t 1 || -e /dev/tty ]]; then
   RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YEL=$'\033[1;33m'
   BLU=$'\033[0;34m'; CYN=$'\033[0;36m'; MAG=$'\033[0;35m'
@@ -131,7 +138,11 @@ gen_password() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-24
   else
-    LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
+    # Read a FINITE chunk first. Piping the infinite /dev/urandom straight into
+    # `head -c` lets `head` close the pipe, killing `tr` with SIGPIPE (exit 141);
+    # under `set -o pipefail` that would propagate as a failure and abort the
+    # script. Reading a fixed 512 bytes up front avoids the early pipe close.
+    head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-24
   fi
 }
 
@@ -168,7 +179,7 @@ run_step() {
 banner() {
   say ""
   say "${CYN}${BLD}  ┌────────────────────────────────────────────────────┐${NC}"
-  say "${CYN}${BLD}  │   KumoMTA  •  Guided Installer for Ubuntu 22.04     │${NC}"
+  say "${CYN}${BLD}  │   KumoMTA  •  Guided Installer for Rocky Linux 8/9  │${NC}"
   say "${CYN}${BLD}  └────────────────────────────────────────────────────┘${NC}"
   say "  ${DIM}A full install log is written to ${INSTALL_LOG}${NC}"
 }
@@ -192,15 +203,30 @@ require_root() { [[ $EUID -eq 0 ]] || die "Please run as root (sudo bash $0)"; }
 
 check_os() {
   header "System requirement checks"
+  local id="" ver="" pretty=""
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
     . /etc/os-release
+    id="${ID:-}"; ver="${VERSION_ID:-}"; pretty="${PRETTY_NAME:-}"
   fi
-  if [[ "${ID:-}" == "ubuntu" && "${VERSION_ID:-}" == "22.04" ]]; then
-    ok "OS: Ubuntu 22.04 LTS"
+  # Prefer the RPM macro for the EL major version; fall back to VERSION_ID.
+  EL_VER="$(rpm -E %rhel 2>/dev/null || true)"
+  [[ "$EL_VER" =~ ^[0-9]+$ ]] || EL_VER="${ver%%.*}"
+
+  case "$id" in
+    rocky)                 : ;;                       # primary target
+    rhel|almalinux|centos) : ;;                       # binary-compatible EL
+    *) warn "OS is ${pretty:-unknown} -- this installer targets Rocky Linux 8/9. Continuing anyway." ;;
+  esac
+
+  if [[ "$EL_VER" == "8" || "$EL_VER" == "9" ]]; then
+    ok "OS: ${pretty:-EL${EL_VER}} (EL${EL_VER} family)"
   else
-    warn "OS is ${PRETTY_NAME:-unknown} -- this script targets Ubuntu 22.04. Continuing anyway."
+    warn "Detected EL major version '${EL_VER:-?}'. KumoMTA RPMs target EL8/EL9 -- continuing anyway."
+    [[ "$EL_VER" =~ ^[0-9]+$ ]] || EL_VER="9"
   fi
+
+  command -v dnf >/dev/null 2>&1 || die "'dnf' not found -- this installer requires a dnf/yum based system (Rocky Linux 8/9)."
 }
 
 check_resources() {
@@ -221,14 +247,16 @@ check_port25_outbound() {
     ok "Outbound port 25 is open."
   else
     warn "Outbound port 25 appears BLOCKED or filtered."
-    warn "Open a ticket with your VPS provider (RackNerd) to unblock it,"
+    warn "Open a ticket with your VPS provider to unblock it,"
     warn "otherwise remote delivery will fail with connection timeouts."
   fi
 }
 
 check_conflicts() {
   local svc found=0
-  for svc in postfix sendmail exim4 opensmtpd; do
+  # Rocky ships Postfix as the default MTA and it is frequently enabled, so it
+  # is the most likely thing holding port 25. exim4 is Debian-only -> "exim".
+  for svc in postfix sendmail exim opensmtpd; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
       warn "Conflicting MTA running: $svc (it likely holds port 25)."
       found=1
@@ -246,8 +274,12 @@ detect_ips() {
   mapfile -t DETECTED < <(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1)
   (( ${#DETECTED[@]} > 0 )) || die "No global IPv4 addresses detected."
   ok "Detected ${#DETECTED[@]} IPv4 address(es): ${DETECTED[*]}"
-  # IPv6 awareness
-  if ip -6 -o addr show scope global 2>/dev/null | grep -q inet6; then
+  # IPv6 awareness. Capture the output and match in-shell rather than piping
+  # into `grep -q`, which (under `set -o pipefail`) can be killed by SIGPIPE and
+  # report a false negative.
+  local v6
+  v6="$(ip -6 -o addr show scope global 2>/dev/null || true)"
+  if [[ "$v6" == *inet6* ]]; then
     info "IPv6 is present, but this installer configures IPv4 sending only"
     info "(stricter provider rules for IPv6 -> not recommended without dedicated PTR)."
   else
@@ -348,7 +380,7 @@ gather_inputs() {
   # --- DMARC + firewall ---
   echo
   DMARC_RUA=$(ask "DMARC aggregate-report email (rua)" "dmarc@${MAIN_DOMAIN}")
-  if confirm "Configure UFW firewall (allow SSH, 25, 80, 587)?" "Y"; then SETUP_FW="Y"; else SETUP_FW="N"; fi
+  if confirm "Configure firewalld (allow SSH, 25, 80, 587)?" "Y"; then SETUP_FW="Y"; else SETUP_FW="N"; fi
 
   # --- post-install test send ---
   echo
@@ -387,10 +419,68 @@ confirm_summary() {
 # ============================================================================
 install_dependencies() {
   header "Installing dependencies"
-  run_step "Refreshing apt package lists" apt-get update -y || die "apt-get update failed."
-  run_step "Installing prerequisites (curl, gnupg, openssl, ufw, dnsutils)" \
-    apt-get install -y --no-install-recommends curl gnupg ca-certificates openssl ufw dnsutils \
+  run_step "Refreshing dnf metadata" dnf -y makecache || warn "dnf makecache reported issues (continuing)."
+  # NOTE: do NOT install the 'curl' package here. Rocky ships 'curl-minimal',
+  # which already provides the curl command; pulling in the full 'curl' package
+  # conflicts with curl-minimal and aborts the whole transaction.
+  #   gnupg2   -> gpg (key handling)         bind-utils -> dig (DNS checks)
+  #   firewalld-> firewall-cmd               gzip/zstd  -> read repo + kumo logs
+  run_step "Installing prerequisites (gnupg2, openssl, firewalld, bind-utils, gzip, zstd)" \
+    dnf -y install gnupg2 ca-certificates openssl firewalld bind-utils gzip zstd \
     || die "Failed to install base packages."
+  if ! command -v curl >/dev/null 2>&1; then
+    run_step "Installing curl" dnf -y install --allowerasing curl || die "curl is required but could not be installed."
+  fi
+}
+
+# Does dnf currently offer the 'kumomta' package? (no pipe -> no SIGPIPE issue)
+kumo_have_candidate() {
+  dnf -q list --available kumomta >/dev/null 2>&1
+}
+
+# Best-effort: surface WHY dnf is not offering the package (repo / gpg / network).
+kumo_show_repo_diag() {
+  info "Diagnosing the KumoMTA repository..."
+  local out diag
+  out="$(dnf -v makecache --repo 'kumomta-stable' 2>&1 || true)"
+  diag="$(printf '%s\n' "$out" | grep -iE 'kumomta|pkgs\.kumomta|openrepo|error|fail|gpg|denied|not found|cannot' || true)"
+  if [[ -n "$diag" ]]; then
+    while IFS= read -r line; do warn "$line"; done <<< "$diag"
+  fi
+  warn "Repo file: $(ls -l "$KUMO_REPO_FILE" 2>/dev/null || echo "MISSING ($KUMO_REPO_FILE)")"
+  return 0
+}
+
+# Fallback installer used when dnf's metadata cannot offer the package despite
+# the repo being reachable. Locates the newest STABLE kumomta .rpm matching the
+# host arch from the repo's primary.xml and installs it via dnf (so deps still
+# resolve and the GPG key is honoured).
+kumo_install_via_rpm() {
+  local rel arch base repomd primary plist rpmrel url
+  rel="${EL_VER:-$(rpm -E %rhel 2>/dev/null || echo 9)}"
+  arch="$(uname -m)"
+  # shellcheck disable=SC2059
+  base="$(printf "$KUMO_PKG_BASE_TMPL" "$rel")"
+
+  repomd="$(curl -fsSL "$base/repodata/repomd.xml" 2>/dev/null || true)"
+  [[ -n "$repomd" ]] || { err "Could not read repo metadata from $base"; return 1; }
+  # First primary.xml.gz href (pure-bash first line -> no SIGPIPE from head).
+  primary="$(printf '%s' "$repomd" | tr '<' '\n' | grep 'location href=' | grep 'primary.xml.gz' | sed -E 's/.*href="([^"]+)".*/\1/')"
+  primary="${primary%%$'\n'*}"
+  [[ -n "$primary" ]] || { err "Could not locate primary.xml.gz in $base"; return 1; }
+
+  # Newest kumomta rpm for our arch (sort ascending, take last line in bash).
+  plist="$(curl -fsSL "$base/$primary" 2>/dev/null | gunzip 2>/dev/null \
+            | tr '<' '\n' | grep -E "location href=\"[^\"]*kumomta[^\"]*\.${arch}\.rpm\"" \
+            | sed -E 's/.*href="([^"]+)".*/\1/' | sort || true)"
+  rpmrel="${plist##*$'\n'}"
+  [[ -n "$rpmrel" ]] || { err "No stable kumomta .rpm found for arch '$arch' in $base"; return 1; }
+
+  url="$base/$rpmrel"
+  run_step "Installing kumomta from the repo RPM ($(basename "$rpmrel"))" \
+    dnf -y install "$url" \
+    || return 1
+  return 0
 }
 
 install_kumomta() {
@@ -400,30 +490,52 @@ install_kumomta() {
     return
   fi
 
-  local listfile="/etc/apt/sources.list.d/kumomta.list"
+  # Add the official KumoMTA repo. We write the .repo file directly rather than
+  # via `dnf config-manager --add-repo`, so we don't depend on dnf-plugins-core
+  # being present (it isn't on minimal images). This is exactly what
+  # config-manager would do. The file enables the stable + dev repos and pins
+  # the GPG key; `dnf install kumomta` pulls the STABLE package.
+  run_step "Adding the KumoMTA repository" \
+    curl -fsSL "$KUMO_REPO_URL" -o "$KUMO_REPO_FILE" \
+    || die "Could not download the KumoMTA repo file from $KUMO_REPO_URL (check network / provider docs)."
+  [[ -s "$KUMO_REPO_FILE" ]] || die "The downloaded repo file $KUMO_REPO_FILE is empty."
+  chmod 644 "$KUMO_REPO_FILE"
+  ok "Wrote $KUMO_REPO_FILE"
 
-  curl -fsSL "$KUMO_LIST_URL" -o "$listfile" \
-    || die "Could not download apt source list from $KUMO_LIST_URL (check network / provider docs)."
+  run_step "Refreshing dnf metadata for the KumoMTA repo" dnf -y makecache \
+    || die "dnf makecache failed after adding the KumoMTA repo."
 
-  # Install the signing key at the path the .list expects (robust to changes).
-  local keyring
-  keyring=$(grep -oE 'signed-by=[^] ]+' "$listfile" | head -1 | cut -d= -f2- || true)
-  keyring="${keyring:-$KUMO_KEYRING}"
-  mkdir -p "$(dirname "$keyring")"
-  curl -fsSL "$KUMO_GPG_URL" | gpg --yes --dearmor -o "$keyring" \
-    || die "Could not import the KumoMTA signing key from $KUMO_GPG_URL."
-  ok "Added KumoMTA apt repository and signing key."
-
-  run_step "Updating apt with the KumoMTA repository" apt-get update -y \
-    || die "apt-get update failed after adding the KumoMTA repo."
-  if ! apt-cache policy kumomta 2>/dev/null | grep -qE 'Candidate: *[0-9]'; then
-    die "The 'kumomta' package was not found after 'apt update'. The repository
-layout may have changed -- see https://docs.kumomta.com/userguide/installation/linux/
-(repo file: $listfile)"
+  # 1) Normal install.
+  if kumo_have_candidate; then
+    if run_step "Installing the KumoMTA package" dnf -y install kumomta \
+       && [[ -x /opt/kumomta/sbin/kumod ]]; then
+      ok "KumoMTA package installed."
+      return
+    fi
+    warn "dnf offered the package but the install did not complete; retrying with a clean cache."
+  else
+    warn "kumomta not offered yet -- clearing the dnf cache and refreshing metadata."
   fi
-  run_step "Installing the KumoMTA package" apt-get install -y kumomta \
-    || die "Failed to install the kumomta package."
-  ok "KumoMTA package installed."
+
+  # 2) Clean re-acquire of metadata, then retry the normal install.
+  run_step "Clearing dnf cache and refreshing metadata" \
+    bash -c 'dnf clean all >/dev/null 2>&1; dnf -y makecache' || true
+  if run_step "Installing the KumoMTA package (retry)" dnf -y install kumomta \
+     && [[ -x /opt/kumomta/sbin/kumod ]]; then
+    ok "KumoMTA package installed."
+    return
+  fi
+
+  # 3) Direct .rpm fallback straight from the (reachable) stable repo.
+  warn "dnf could not install 'kumomta'; falling back to a direct .rpm install."
+  kumo_show_repo_diag
+  if kumo_install_via_rpm && [[ -x /opt/kumomta/sbin/kumod ]]; then
+    ok "KumoMTA package installed (direct .rpm from the stable repo)."
+    return
+  fi
+
+  err "The 'kumomta' package could not be installed via dnf or direct download."
+  die "Check $KUMO_REPO_FILE and https://docs.kumomta.com/userguide/installation/linux/"
 }
 
 system_prep() {
@@ -512,10 +624,19 @@ verify_dns() {
 setup_ssl() {
   [[ "$SETUP_SSL" == "Y" ]] || return 0
   header "SSL certificate (Let's Encrypt)"
-  run_step "Installing certbot" apt-get install -y certbot || die "Failed to install certbot."
 
-  # Free port 80 for standalone challenge if a web server is running.
-  systemctl stop nginx apache2 2>/dev/null || true
+  # On EL8/EL9 certbot lives in EPEL.
+  run_step "Enabling EPEL repository" dnf -y install epel-release \
+    || warn "Could not install epel-release (certbot may be unavailable)."
+  if ! run_step "Installing certbot" dnf -y install certbot; then
+    warn "Failed to install certbot; continuing WITHOUT SSL."
+    warn "Enable EPEL and run 'dnf install certbot' manually, then re-run certbot."
+    SETUP_SSL="N"
+    return 0
+  fi
+
+  # Free port 80 for the standalone challenge if a web server is running.
+  systemctl stop nginx httpd 2>/dev/null || true
 
   if run_step "Requesting certificate for ${PRIMARY_FQDN}" \
       certbot certonly --standalone --non-interactive --agree-tos \
@@ -698,7 +819,7 @@ write_init_lua() {
   fi
   cat > "$f" <<EOF
 -- Generated by install.sh -- KumoMTA main policy
--- Validate:  sudo -u ${KUMO_USER} /opt/kumomta/sbin/kumod --policy ${f} --validate
+-- Validate:  runuser -u ${KUMO_USER} -- /opt/kumomta/sbin/kumod --policy ${f} --validate
 local kumo = require 'kumo'
 local sources = require 'policy-extras.sources'
 local dkim_sign = require 'policy-extras.dkim_sign'
@@ -786,8 +907,10 @@ write_all_configs() {
 # ============================================================================
 validate_and_start() {
   header "Validating & starting KumoMTA"
+  # runuser is part of util-linux (always present on EL) and, unlike sudo, needs
+  # no sudoers entry to drop to the service account.
   if run_step "Validating policy (kumod --validate)" \
-       sudo -u "$KUMO_USER" /opt/kumomta/sbin/kumod --policy "$POLICY_DIR/init.lua" --validate; then
+       runuser -u "$KUMO_USER" -- /opt/kumomta/sbin/kumod --policy "$POLICY_DIR/init.lua" --validate; then
     ok "Policy validated."
   else
     err "Policy validation FAILED. Last lines of the log:"
@@ -806,13 +929,18 @@ validate_and_start() {
 
 setup_firewall() {
   [[ "$SETUP_FW" == "Y" ]] || return 0
-  header "Firewall (UFW)"
-  ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null
-  ufw allow 25/tcp  >/dev/null   # SMTP (inbound bounces; outbound delivery)
-  ufw allow 80/tcp  >/dev/null   # Let's Encrypt issuance + renewal
-  ufw allow 587/tcp >/dev/null   # submission (STARTTLS)
-  yes | ufw enable >/dev/null 2>&1 || true
-  ok "UFW configured (allowed: SSH, 25, 80, 587)."
+  header "Firewall (firewalld)"
+  if ! run_step "Enabling firewalld" bash -c 'systemctl enable --now firewalld'; then
+    warn "Could not start firewalld; skipping firewall configuration."
+    return 0
+  fi
+  # SSH as a service (falls back to the raw port); mail/web/submission as ports.
+  firewall-cmd --permanent --add-service=ssh   >/dev/null 2>&1 || firewall-cmd --permanent --add-port=22/tcp  >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port=25/tcp   >/dev/null 2>&1 || true   # SMTP (inbound bounces; outbound delivery)
+  firewall-cmd --permanent --add-port=80/tcp   >/dev/null 2>&1 || true   # Let's Encrypt issuance + renewal
+  firewall-cmd --permanent --add-port=587/tcp  >/dev/null 2>&1 || true   # submission (STARTTLS)
+  firewall-cmd --reload >/dev/null 2>&1 || true
+  ok "firewalld configured (allowed: SSH, 25, 80, 587)."
   info "Note: KumoMTA supports STARTTLS only (no implicit-TLS/465), so submit on 587."
 }
 
@@ -852,8 +980,16 @@ do_test_send() {
   info "Waiting ~10s for a delivery attempt, then showing recent log activity..."
   sleep 10
   # KumoMTA log segments may be zstd/gzip/plain -- try each, grep for the recipient.
-  local newest
-  newest=$(find "$LOG_DIR" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+  # Capture+parse in-shell instead of `... | sort | head -1`, since `head`
+  # closing the pipe can kill `sort` with SIGPIPE (exit 141) and, under
+  # `set -o pipefail`, abort the whole script during this final step.
+  local newest logs
+  logs="$(find "$LOG_DIR" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr || true)"
+  newest=""
+  if [[ -n "$logs" ]]; then
+    newest="${logs%%$'\n'*}"   # first (newest) line: "<mtime> <path>"
+    newest="${newest#* }"      # strip the leading mtime field
+  fi
   if [[ -n "$newest" && -f "$newest" ]]; then
     info "Newest log segment: $newest"
     { zstdcat "$newest" 2>/dev/null || zcat "$newest" 2>/dev/null || cat "$newest" 2>/dev/null; } \

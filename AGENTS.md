@@ -5,15 +5,16 @@ Guidance for AI coding agents working in this repository.
 ## What this project is
 
 A **single interactive Bash installer** that sets up a **fresh (clean)
-[KumoMTA](https://kumomta.com) outbound email server on Ubuntu 22.04 LTS**.
-There is no application code, build system, or dependency manifest — the entire
-project is one script plus its documentation.
+[KumoMTA](https://kumomta.com) outbound email server on Rocky Linux 8 / 9**
+(KumoMTA's officially recommended platform; also works on AlmaLinux / RHEL /
+CentOS Stream 8/9). There is no application code, build system, or dependency
+manifest — the entire project is one script plus its documentation.
 
 The installer performs: system checks → interactive configuration → KumoMTA
-install (official APT repo) → OS tuning → live DNS verification → Let's Encrypt
-SSL → DKIM key generation → KumoMTA policy generation → `kumod --validate` →
-service start → UFW firewall → optional test send → prints & saves all DNS
-records and SMTP credentials.
+install (official dnf/yum repo) → OS tuning → live DNS verification → Let's
+Encrypt SSL (certbot from EPEL) → DKIM key generation → KumoMTA policy
+generation → `kumod --validate` → service start → firewalld → optional test
+send → prints & saves all DNS records and SMTP credentials.
 
 ## Repository layout
 
@@ -38,6 +39,17 @@ only on the target host. For repo-side checks:
 ```bash
 bash -n install.sh          # syntax check (required before commit)
 shellcheck install.sh       # if available; aim for no warnings
+```
+
+For a full end-to-end check, run the dnf install path inside a Rocky container
+(both majors are supported):
+
+```bash
+docker run --rm -v "$PWD/install.sh:/install.sh:ro" rockylinux:9 bash -c \
+  'curl -fsSL https://openrepo.kumomta.com/files/kumomta-rocky.repo \
+     -o /etc/yum.repos.d/kumomta.repo && dnf -y install kumomta && \
+   /opt/kumomta/sbin/kumod --version'
+# repeat with rockylinux:8
 ```
 
 For logic-only testing, copy individual functions into a scratch script and
@@ -91,11 +103,23 @@ answer and the prompt is always visible even inside command substitution.
 These were validated against the official docs in Apr 2026; changing them risks
 breaking the install or `kumod --validate`:
 
-- **APT repo:** key `https://openrepo.kumomta.com/kumomta-ubuntu-22/public.gpg`
-  dearmored to `/usr/share/keyrings/kumomta.gpg`; sources list downloaded from
-  `https://openrepo.kumomta.com/files/kumomta-ubuntu22.list`. `install_kumomta`
-  also reads the `signed-by=` path from the list and verifies the `kumomta`
-  candidate exists before installing.
+- **dnf/yum repo:** the official repo file
+  `https://openrepo.kumomta.com/files/kumomta-rocky.repo` is written directly to
+  `/etc/yum.repos.d/kumomta.repo` (writing it ourselves avoids depending on
+  `dnf-plugins-core` / `dnf config-manager`, which are absent on minimal
+  images — this is exactly what `config-manager --add-repo` would do). The file
+  uses `$releasever`, so one file works on EL8 and EL9; it defines
+  `kumomta-stable` (the `kumomta` package we install) and `kumomta-dev`
+  (`kumomta-dev`, pre-release only). `install_kumomta` refreshes metadata, then
+  tries: normal `dnf install kumomta` → clean-cache retry → direct `.rpm`
+  install located from the stable repo's `repodata` (handles a stubborn cache).
+- **Do NOT add the `curl` package to the dnf install list** — Rocky ships
+  `curl-minimal` (which provides the `curl` command), and pulling in the full
+  `curl` package conflicts with it and aborts the whole transaction. The script
+  installs `gnupg2 ca-certificates openssl firewalld bind-utils gzip zstd` and
+  only installs `curl --allowerasing` if the command is genuinely missing.
+- **Drop privileges with `runuser -u kumod --`** (from util-linux, always
+  present on EL) rather than `sudo -u` — no sudoers entry required.
 - **`kumod --validate`** is the supported pre-flight check (loads policy, inits
   the DKIM signer; does not bind listeners).
 - **Shaper MUST be registered:** `local shaper = shaping:setup{...}` does nothing
@@ -131,6 +155,7 @@ breaking the install or `kumod --validate`:
 ## External references
 
 - KumoMTA docs: https://docs.kumomta.com
-- Install (Ubuntu): https://docs.kumomta.com/userguide/installation/linux/
+- Install (Linux): https://docs.kumomta.com/userguide/installation/linux/
+- Install tutorial (Rocky Linux): https://docs.kumomta.com/tutorial/installing_kumomta/
 - Example policy: https://docs.kumomta.com/userguide/configuration/example/
 - HTTP injection: https://docs.kumomta.com/userguide/operation/httpinjection/
