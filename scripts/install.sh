@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================================
-# KumoMTA interactive installer  (Ubuntu 22.04 LTS)
+# KumoMTA clean-install setup  (Ubuntu 22.04 LTS)
 # -----------------------------------------------------------------------------
+# Interactive installer for a FRESH KumoMTA outbound sending server.
 # Guided setup: system checks -> interactive config -> install KumoMTA ->
 # SSL (Let's Encrypt) -> DKIM -> policy generation -> validate -> start.
 # At the end it prints (and saves) ALL DNS entries and SMTP credentials.
+#
+# PREREQUISITES (see README.md):
+#   * A records for each IP's hostname (smtp, mta1, mta2, ...) ALREADY created
+#   * PTR / reverse DNS for each IP set at your VPS provider
+#   * Ports 25, 587, 465 (and 80 for SSL) open / unblocked by your provider
 #
 #   sudo bash scripts/install.sh
 #
@@ -102,7 +108,7 @@ declare -a IPS=() SUBS=() FQDNS=()
 SMTP_USER=""; SMTP_PASS=""
 DAILY_LIMIT=""; PER_IP_HOURLY=""; WARMUP="N"; START_RATE=""
 LE_EMAIL=""; SETUP_SSL="Y"
-DKIM_SELECTOR="default"; DKIM_MODE="new"; DKIM_EXISTING_PATH=""
+DKIM_SELECTOR="default"
 DMARC_RUA=""; SETUP_FW="Y"
 
 # ============================================================================
@@ -248,15 +254,6 @@ gather_inputs() {
   # --- DKIM ---
   echo
   DKIM_SELECTOR=$(ask "DKIM selector" "default")
-  if confirm "Re-use an EXISTING DKIM private key (e.g. migrated from PowerMTA)?" "N"; then
-    DKIM_MODE="existing"
-    while :; do
-      DKIM_EXISTING_PATH=$(ask "  Path to existing DKIM private key (.pem/.key)")
-      [[ -r "$DKIM_EXISTING_PATH" ]] && break || warn "File not readable: $DKIM_EXISTING_PATH"
-    done
-  else
-    DKIM_MODE="new"
-  fi
 
   # --- SSL ---
   echo
@@ -289,7 +286,7 @@ confirm_summary() {
   echo "  Daily volume target: $DAILY_LIMIT"
   echo "  Per-IP/provider cap: ${PER_IP_HOURLY}/hr"
   echo "  Warmup mode        : $WARMUP${WARMUP:+ (start ${START_RATE:-}/hr)}"
-  echo "  DKIM selector      : $DKIM_SELECTOR ($DKIM_MODE key)"
+  echo "  DKIM selector      : $DKIM_SELECTOR (new 2048-bit key)"
   echo "  Let's Encrypt SSL  : $SETUP_SSL"
   echo "  DMARC rua          : $DMARC_RUA"
   echo "  Configure firewall : $SETUP_FW"
@@ -325,7 +322,7 @@ system_prep() {
   header "OS tuning"
   hostnamectl set-hostname "$PRIMARY_FQDN"
   grep -q "$PRIMARY_FQDN" /etc/hosts 2>/dev/null || \
-    echo "127.0.1.1 ${PRIMARY_FQDN} ${SUBS[0]}" >> /etc/hosts
+    echo "${IPS[0]} ${PRIMARY_FQDN} ${SUBS[0]}" >> /etc/hosts
 
   cat >/etc/sysctl.d/99-kumomta.conf <<'EOF'
 fs.file-max = 250000
@@ -341,7 +338,7 @@ EOF
 }
 
 # ============================================================================
-# 4. DNS PREVIEW  (must exist before SSL)
+# 4. DNS VERIFICATION  (A records must already exist; see README)
 # ============================================================================
 build_spf() {
   local spf="v=spf1"; local ip
@@ -350,37 +347,55 @@ build_spf() {
 }
 
 print_dns_preview() {
-  header "DNS entries to create NOW (before SSL issuance)"
-  echo "Create these A records at your DNS provider, then set PTR (rDNS) at your VPS host:"
-  echo
+  header "Required A records (these should ALREADY exist -- see README)"
   printf '  %-28s %-6s %s\n' "NAME" "TYPE" "VALUE"
   local i
   for i in "${!IPS[@]}"; do
     printf '  %-28s %-6s %s\n' "${FQDNS[$i]}." "A" "${IPS[$i]}"
   done
   echo
-  echo "PTR / reverse DNS (set these in your VPS provider panel):"
+  echo "  PTR / reverse DNS (set in your VPS provider panel -- must match):"
   for i in "${!IPS[@]}"; do
-    printf '  %-16s PTR -> %s\n' "${IPS[$i]}" "${FQDNS[$i]}"
+    printf '    %-16s PTR -> %s\n' "${IPS[$i]}" "${FQDNS[$i]}"
   done
   echo
-  warn "Port 80 must be reachable and ${PRIMARY_FQDN} must resolve to this server for SSL."
+  info "DKIM / SPF / DMARC will be generated and PRINTED after install."
 }
 
-wait_for_dns() {
-  [[ "$SETUP_SSL" == "Y" ]] || return 0
-  echo
+# query real DNS (dig bypasses /etc/hosts); returns space-padded A records
+_dns_a() { dig +short A "$1" 2>/dev/null | tr '\n' ' '; }
+
+verify_dns() {
+  header "Verifying DNS A records"
+  local i got
   while :; do
-    local resolved
-    resolved=$(getent hosts "$PRIMARY_FQDN" | awk '{print $1}' | head -1 || true)
-    if [[ -n "$resolved" ]]; then
-      ok "${PRIMARY_FQDN} resolves to ${resolved}."
-      [[ " ${IPS[*]} " == *" $resolved "* ]] || warn "...but that IP is not in your sending set. Continue only if intentional."
-      break
-    fi
-    warn "${PRIMARY_FQDN} does not resolve yet."
-    confirm "Re-check DNS now? (No = skip SSL)" "Y" || { SETUP_SSL="N"; warn "Skipping SSL."; return 0; }
+    local all_ok=1
+    for i in "${!FQDNS[@]}"; do
+      got=" $(_dns_a "${FQDNS[$i]}") "
+      if [[ "$got" == *" ${IPS[$i]} "* ]]; then
+        ok "${FQDNS[$i]} -> ${IPS[$i]}"
+      elif [[ "$got" =~ [0-9] ]]; then
+        warn "${FQDNS[$i]} ->${got}(expected ${IPS[$i]})"; all_ok=0
+      else
+        warn "${FQDNS[$i]} has NO A record yet (expected ${IPS[$i]})"; all_ok=0
+      fi
+    done
+    (( all_ok == 1 )) && { ok "All A records resolve correctly."; break; }
+    echo
+    warn "Create/fix the A records above at your DNS provider, then re-check."
+    confirm "Re-check DNS now? (No = continue anyway)" "Y" || { warn "Continuing without complete DNS."; break; }
   done
+
+  # SSL needs the primary hostname to resolve to one of our IPs + port 80.
+  if [[ "$SETUP_SSL" == "Y" ]]; then
+    got=" $(_dns_a "$PRIMARY_FQDN") "
+    if [[ "$got" == *" ${IPS[0]} "* ]]; then
+      ok "Primary ${PRIMARY_FQDN} resolves correctly -- SSL can proceed."
+    else
+      warn "Primary ${PRIMARY_FQDN} does not resolve to ${IPS[0]} (got:${got})."
+      confirm "Attempt Let's Encrypt anyway?" "N" || { SETUP_SSL="N"; warn "Skipping SSL."; }
+    fi
+  fi
 }
 
 # ============================================================================
@@ -440,21 +455,21 @@ setup_dkim() {
   local keyfile="$keydir/$DKIM_SELECTOR.key"
   mkdir -p "$keydir"
 
-  if [[ "$DKIM_MODE" == "existing" ]]; then
-    cp "$DKIM_EXISTING_PATH" "$keyfile"
-    ok "Re-used existing DKIM key -> $keyfile"
-    warn "Keep the matching public key published at ${DKIM_SELECTOR}._domainkey.${MAIN_DOMAIN}."
-    DKIM_RECORD="(unchanged -- keep your existing published record)"
+  if [[ -s "$keyfile" ]]; then
+    ok "Existing DKIM key found -> $keyfile (reusing, not regenerating)."
   else
     openssl genrsa -out "$keyfile" 2048 2>/dev/null
-    local tmp pub
-    tmp=$(mktemp)
-    openssl rsa -in "$keyfile" -pubout -out "$tmp" 2>/dev/null
-    pub=$(grep -v '^-----' "$tmp" | tr -d '\n')
-    rm -f "$tmp"
-    DKIM_RECORD="v=DKIM1; k=rsa; p=${pub}"
     ok "Generated 2048-bit DKIM key -> $keyfile"
   fi
+
+  # Derive the public-key DNS record from the private key (works either way).
+  local tmp pub
+  tmp=$(mktemp)
+  openssl rsa -in "$keyfile" -pubout -out "$tmp" 2>/dev/null
+  pub=$(grep -v '^-----' "$tmp" | tr -d '\n')
+  rm -f "$tmp"
+  DKIM_RECORD="v=DKIM1; k=rsa; p=${pub}"
+
   chown -R "$KUMO_USER:$KUMO_USER" "$DKIM_DIR"
   chmod 600 "$keyfile"
 }
@@ -729,7 +744,7 @@ print_summary() {
     echo "  1. Confirm all PTR records match the A records above."
     echo "  2. Send a test mail; verify SPF/DKIM/DMARC pass (e.g. mail-tester)."
     echo "  3. Watch logs:  journalctl -u kumomta -f   and   ${LOG_DIR}/"
-    [[ "$DKIM_MODE" == "new" ]] && echo "  4. DKIM TXT records can be long; some DNS panels need them split into 255-char chunks."
+    echo "  4. DKIM TXT records can be long; some DNS panels need them split into 255-char chunks."
     echo "============================================================"
   } | tee "$SUMMARY_FILE"
   chmod 600 "$SUMMARY_FILE"
@@ -756,7 +771,7 @@ main() {
   install_kumomta
   system_prep
   print_dns_preview
-  wait_for_dns
+  verify_dns
   setup_ssl
   setup_dkim
   write_all_configs
