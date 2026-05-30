@@ -134,10 +134,23 @@ will show ready-to-paste records:
    recipient you choose, then tails the log so you can confirm delivery.
 
 ### Design notes
+- **Policy follows the official example:** the generated `init.lua` is modeled
+  on the [KumoMTA example policy](https://docs.kumomta.com/userguide/configuration/example/)
+  and uses the `policy-extras` helpers (sources, dkim_sign, shaping, queue,
+  listener_domains).
+- **Traffic Shaping Automation (TSA):** shaping uses `setup_with_automation`
+  with the `kumo-tsa-daemon` (on `127.0.0.1:8008`), layering the
+  KumoMTA-maintained + community shaping rules with your local overrides, so
+  per-provider throttles auto-adjust to MBP feedback. `shaping.toml` only sets
+  global defaults; per-provider rules come from the maintained ruleset.
 - **"Daily limit" vs rate:** KumoMTA throttles per `(IP → receiving provider)`,
   not as one global daily counter. Your daily number drives capacity/warmup
   advice; the per-IP/provider hourly cap (in `shaping.toml`) is the limit that
   actually protects deliverability.
+- **Authenticated relay:** external injectors authenticate via SMTP AUTH PLAIN
+  (over STARTTLS) and are authorized to relay via `relay_from_authz` in
+  `listener_domains.toml`; localhost is allowed via `relay_hosts`. No open relay.
+- **DKIM:** signs the RFC 6376 recommended header set with oversigning enabled.
 - **TLS for `kumod`:** Let's Encrypt keys are root-only, so certs are copied to
   `/opt/kumomta/etc/tls/` (owned by `kumod`); the renewal hook re-copies and
   restarts the service.
