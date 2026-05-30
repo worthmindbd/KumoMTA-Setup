@@ -1,13 +1,16 @@
 # KumoMTA Clean Installer
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Ubuntu 22.04 LTS](https://img.shields.io/badge/Ubuntu-22.04%20LTS-E95420?logo=ubuntu&logoColor=white)
+![Rocky Linux 8 / 9](https://img.shields.io/badge/Rocky%20Linux-8%20%7C%209-10B981?logo=rockylinux&logoColor=white)
 
 A single interactive script that installs and configures a **fresh KumoMTA**
-outbound email server on **Ubuntu 22.04 LTS** — system checks, KumoMTA install,
-OS tuning, Let's Encrypt SSL, DKIM, traffic shaping, validation, and service
-start. At the end it prints (and saves) all the DNS records and SMTP
-credentials you need.
+outbound email server on **Rocky Linux 8 / 9** (the platform KumoMTA officially
+recommends) — system checks, KumoMTA install, OS tuning, Let's Encrypt SSL,
+DKIM, traffic shaping, validation, and service start. At the end it prints (and
+saves) all the DNS records and SMTP credentials you need.
+
+> Also works on binary-compatible EL8/EL9 rebuilds (AlmaLinux, RHEL,
+> CentOS Stream).
 
 ```bash
 git clone https://github.com/worthmindbd/KumoMTA-Setup.git
@@ -20,7 +23,7 @@ sudo bash install.sh
 ## Requirements
 
 ### Server
-- **Ubuntu 22.04 LTS**, fresh install
+- **Rocky Linux 8 or 9**, fresh install (or AlmaLinux / RHEL / CentOS Stream 8/9)
 - **4+ vCPU**, **4 GB+ RAM** (6 GB recommended), **20 GB+** free disk
 - root / sudo access
 
@@ -42,18 +45,19 @@ sudo bash install.sh
 
 Two layers may apply — make sure required ports are allowed on **both**:
 
-1. **Your VPS provider's firewall / security group** (RackNerd panel, cloud
+1. **Your VPS provider's firewall / security group** (provider panel, cloud
    security group, etc.) — allow inbound `22, 25, 80, 587` and outbound `25`.
    This is outside the server and the script cannot change it.
-2. **The server's own firewall (UFW)** — the installer configures this for you
-   (allows SSH, 25, 80, 587 and enables UFW). To do it manually:
+2. **The server's own firewall (firewalld)** — the installer configures this for
+   you (allows SSH, 25, 80, 587 and enables firewalld). To do it manually:
 
    ```bash
-   sudo ufw allow OpenSSH      # 22
-   sudo ufw allow 25/tcp       # SMTP (in + out)
-   sudo ufw allow 80/tcp       # Let's Encrypt
-   sudo ufw allow 587/tcp      # submission (STARTTLS)
-   sudo ufw enable
+   sudo systemctl enable --now firewalld
+   sudo firewall-cmd --permanent --add-service=ssh   # 22
+   sudo firewall-cmd --permanent --add-port=25/tcp   # SMTP (in + out)
+   sudo firewall-cmd --permanent --add-port=80/tcp   # Let's Encrypt
+   sudo firewall-cmd --permanent --add-port=587/tcp  # submission (STARTTLS)
+   sudo firewall-cmd --reload
    ```
 
 ### How many IPs do you have?
