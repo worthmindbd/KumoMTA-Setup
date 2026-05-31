@@ -5,31 +5,39 @@ Guidance for AI coding agents working in this repository.
 ## What this project is
 
 A **single interactive Bash installer** that sets up a **fresh (clean)
-[KumoMTA](https://kumomta.com) outbound email server on Rocky Linux 8 / 9**
-(KumoMTA's officially recommended platform; also works on AlmaLinux / RHEL /
-CentOS Stream 8/9). There is no application code, build system, or dependency
-manifest — the entire project is one script plus its documentation.
+[KumoMTA](https://kumomta.com) outbound email server** on **Rocky Linux 8 / 9**
+(KumoMTA's officially recommended platform; also AlmaLinux / RHEL / CentOS
+Stream 8/9) **or Ubuntu 20.04 / 22.04**. It auto-detects the OS family and uses
+the matching package manager (`dnf`/`apt`) and firewall (`firewalld`/`ufw`).
+There is no application code, build system, or dependency manifest — the entire
+project is one script plus its documentation.
 
 The installer performs: system checks → interactive configuration → KumoMTA
-install (official dnf/yum repo) → OS tuning → live DNS verification → Let's
-Encrypt SSL (certbot from EPEL) → DKIM key generation → KumoMTA policy
-generation → `kumod --validate` → service start → firewalld → optional test
-send → prints & saves all DNS records and SMTP credentials.
+install (official dnf or apt repo) → OS tuning → live DNS verification → Let's
+Encrypt SSL (certbot) → DKIM key generation → KumoMTA policy generation
+(modeled on the official example, with Traffic Shaping Automation) →
+`kumod --validate` → start `kumo-tsa-daemon` + `kumomta` → firewall → optional
+test send → prints & saves all DNS records and SMTP credentials.
+
+`enable-ssl.sh` is a separate, re-runnable helper to obtain the Let's Encrypt
+cert and wire STARTTLS into the policy after the fact (also cross-distro).
 
 ## Repository layout
 
 ```
-install.sh    The whole installer (Bash). Edit this for any behavior change.
-README.md     End-user docs: requirements, ports, firewall, DNS workflow, usage.
-AGENTS.md     This file.
-CLAUDE.md     Symlink -> AGENTS.md (so Claude Code reads the same guidance).
-LICENSE       MIT license.
+install.sh     The whole installer (Bash). Edit this for any behavior change.
+enable-ssl.sh  Re-runnable helper: obtain LE cert + enable STARTTLS post-install.
+README.md      End-user docs: requirements, ports, firewall, DNS workflow, usage.
+AGENTS.md      This file.
+CLAUDE.md      Symlink -> AGENTS.md (so Claude Code reads the same guidance).
+LICENSE        MIT license.
 ```
 
 There are intentionally **no config files in the repo**. KumoMTA's policy files
-(`init.lua`, `sources.toml`, `dkim_data.toml`, `shaping.toml`, `queues.toml`,
-`listener_domains.toml`) are **generated at runtime by `install.sh`** on the
-target server under `/opt/kumomta/etc/policy/`. Do not look for them here.
+(`init.lua`, `tsa_init.lua`, `sources.toml`, `dkim_data.toml`, `shaping.toml`,
+`queues.toml`, `listener_domains.toml`) are **generated at runtime by
+`install.sh`** on the target server under `/opt/kumomta/etc/policy/`. Do not
+look for them here.
 
 ## How to validate changes
 
@@ -41,16 +49,14 @@ bash -n install.sh          # syntax check (required before commit)
 shellcheck install.sh       # if available; aim for no warnings
 ```
 
-For a full end-to-end check, run the dnf install path inside a Rocky container
-(both majors are supported):
-
-```bash
-docker run --rm -v "$PWD/install.sh:/install.sh:ro" rockylinux:9 bash -c \
-  'curl -fsSL https://openrepo.kumomta.com/files/kumomta-rocky.repo \
-     -o /etc/yum.repos.d/kumomta.repo && dnf -y install kumomta && \
-   /opt/kumomta/sbin/kumod --version'
-# repeat with rockylinux:8
-```
+For a full end-to-end check, exercise the real functions inside containers for
+all four targets: `rockylinux:9`, `rockylinux:8`, `ubuntu:22.04`, `ubuntu:20.04`.
+A practical pattern: base64-encode `install.sh` and pass it via `-e` to
+`docker run -i ... bash -s` (bind-mounting `/tmp` may not work in all sandboxes),
+then `source` it (minus the final `main "$@"`), call `check_os`,
+`install_dependencies`, `install_kumomta`, generate the policy, and run
+`kumod --validate`. Verify on EL **and** Debian families since the package
+manager, firewall, and certbot source all branch on `OS_FAMILY`.
 
 For logic-only testing, copy individual functions into a scratch script and
 feed simulated input via `printf '...\n' | func`. The input helpers
@@ -100,42 +106,62 @@ answer and the prompt is always visible even inside command substitution.
 
 ## Verified install/config facts (do not regress)
 
-These were validated against the official docs in Apr 2026; changing them risks
-breaking the install or `kumod --validate`:
+These were validated against the official docs and live container tests;
+changing them risks breaking the install or `kumod --validate`:
 
-- **dnf/yum repo:** the official repo file
-  `https://openrepo.kumomta.com/files/kumomta-rocky.repo` is written directly to
-  `/etc/yum.repos.d/kumomta.repo` (writing it ourselves avoids depending on
-  `dnf-plugins-core` / `dnf config-manager`, which are absent on minimal
-  images — this is exactly what `config-manager --add-repo` would do). The file
-  uses `$releasever`, so one file works on EL8 and EL9; it defines
-  `kumomta-stable` (the `kumomta` package we install) and `kumomta-dev`
-  (`kumomta-dev`, pre-release only). `install_kumomta` refreshes metadata, then
-  tries: normal `dnf install kumomta` → clean-cache retry → direct `.rpm`
-  install located from the stable repo's `repodata` (handles a stubborn cache).
+- **OS detection (`check_os`)** sets `OS_FAMILY` to `el` or `debian` plus
+  `EL_VER` (8/9) or `UBU_VER` (22/20). Package manager, firewall, and certbot
+  source all branch on `OS_FAMILY`.
+- **EL repo (dnf):** write `https://openrepo.kumomta.com/files/kumomta-rocky.repo`
+  directly to `/etc/yum.repos.d/kumomta.repo` (avoids needing
+  `dnf-plugins-core`/`config-manager`). It uses `$releasever`, so one file works
+  on EL8 and EL9.
+- **Ubuntu repo (apt):** dearmor the `kumomta-ubuntu-<22|20>/public.gpg` key to
+  `/usr/share/keyrings/kumomta.gpg` and **`chmod 644`** it (apt fetches/verifies
+  as the unprivileged `_apt` user; a 0600/0640 keyring makes apt silently skip
+  the signed repo), then install the `kumomta-ubuntu<22|20>.list` sources file.
+- **Install flow is 3-tier** (per family): normal install → clean-cache retry →
+  direct `.rpm`/`.deb` download from the stable repo. The candidate check
+  (`kumo_have_candidate`) **captures `apt-cache policy` to a var and matches with
+  `[[ =~ ]]`** — never pipe into `grep -q`, which under `pipefail` dies from
+  SIGPIPE and yields a false negative.
 - **Do NOT add the `curl` package to the dnf install list** — Rocky ships
-  `curl-minimal` (which provides the `curl` command), and pulling in the full
-  `curl` package conflicts with it and aborts the whole transaction. The script
-  installs `gnupg2 ca-certificates openssl firewalld bind-utils gzip zstd` and
-  only installs `curl --allowerasing` if the command is genuinely missing.
-- **Drop privileges with `runuser -u kumod --`** (from util-linux, always
-  present on EL) rather than `sudo -u` — no sudoers entry required.
-- **`kumod --validate`** is the supported pre-flight check (loads policy, inits
-  the DKIM signer; does not bind listeners).
-- **Shaper MUST be registered:** `local shaper = shaping:setup{...}` does nothing
-  on its own — you must `kumo.on('get_egress_path_config', ...)`. The generated
-  policy handles both function- and object-style returns.
-- **Generated TOML is kept minimal on purpose** to avoid unknown-field errors:
-  - `dkim_data.toml`: only `[domain."x"]` with `selector` + `headers` (helper
-    derives key path `/opt/kumomta/etc/dkim/<domain>/<selector>.key`, defaults
-    RSA sha256, relaxed/relaxed).
-  - `queues.toml`: only `[queue.default]` with `egress_pool`.
+  `curl-minimal`; pulling full `curl` conflicts and aborts the transaction. (On
+  Ubuntu `curl` is installed normally.)
+- **Drop privileges with `runuser -u kumod --`** (util-linux; on both families),
+  not `sudo -u`.
+- **Traffic Shaping Automation (TSA) is enabled:** `init.lua` uses
+  `shaping:setup_with_automation { publish/subscribe = http://127.0.0.1:8008,
+  extra_files = {community (if present), local shaping.toml} }`, calls
+  `shaper.setup_publish()` in `init`, and registers
+  `get_egress_path_config`. A `tsa_init.lua` is generated and the
+  `kumo-tsa-daemon` service is started before `kumomta`.
+- **Helper setup ORDER matters:** set up shaping **before** the queue helper —
+  both register `get_queue_config` and KumoMTA requires `queue.lua` to register
+  LAST, or `kumod --validate` fails.
+- **SMTP AUTH handler signature is 4 args:** `smtp_server_auth_plain(authz,
+  authc, password, conn_meta)` — `authc` is the username. (AUTH is offered only
+  after STARTTLS; KumoMTA has no AUTH LOGIN event, only PLAIN.)
+- **Authenticated relay requires `relay_from_authz`** in `listener_domains.toml`
+  (the `["*"]` block lists the SMTP user). Successful AUTH alone does NOT grant
+  relay; without this an authenticated external client gets `5.7.1 relaying not
+  permitted`.
+- **Generated TOML:**
+  - `dkim_data.toml`: `[base]` with `over_sign = true` + the RFC 6376 header set;
+    `[domain."x"]` with `selector` + `algo` (helper derives key path
+    `/opt/kumomta/etc/dkim/<domain>/<selector>.key`). Do NOT sign
+    `Content-Type`/`MIME-Version`.
+  - `shaping.toml`: ONLY `["default"]` (connection_limit + max_message_rate).
+    Do NOT add per-domain `["gmail.com"]` blocks — they alias to a provider site
+    in the maintained ruleset and cause an "also matched by provider" error.
+  - `queues.toml`: `[queue.default]` with `egress_pool` + `max_age`.
   - `sources.toml`: `[source."x"]` (`source_address`, `ehlo_domain`) +
     `[pool."send-pool"."x"]` (`weight`).
-  - `shaping.toml`: `["default"]` and per-domain `["gmail.com"]` etc. with
-    `max_message_rate` (`/hr` is a valid period) and `connection_limit`.
-- **Message handler order:** `queue_helper:apply(msg)` then `dkim_signer(msg)`
-  (signing must be last).
+  - `listener_domains.toml`: `["*"]` with `relay_to=false`, `log_oob`, `log_arf`,
+    `relay_from_authz=[<smtp user>]`.
+- **Message handler order:** SMTP-smuggling guard
+  (`msg:check_fix_conformance('NON_CANONICAL_LINE_ENDINGS','')`) →
+  `queue_helper:apply(msg)` → `dkim_signer(msg)` (signing must be LAST).
 
 ## Conventions & guardrails
 

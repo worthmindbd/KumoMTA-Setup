@@ -11,7 +11,8 @@
 #   sudo bash enable-ssl.sh                 # auto-detects hostname, prompts email
 #   sudo bash enable-ssl.sh smtp.example.com you@example.com
 #
-# Targets Rocky Linux 8/9 (EL8/EL9). KumoMTA supports STARTTLS only (no 465).
+# Works on Rocky Linux 8/9 and Ubuntu 20.04/22.04. KumoMTA supports STARTTLS
+# only (no 465).
 # =============================================================================
 set -euo pipefail
 
@@ -58,11 +59,18 @@ info "Hostname : $FQDN"
 info "Email    : $LE_EMAIL"
 echo
 
-# --- ensure certbot is installed (EPEL) -----------------------------------
+# --- ensure certbot is installed (apt on Ubuntu, EPEL on EL) ---------------
 if ! command -v certbot >/dev/null 2>&1; then
-  info "Installing certbot from EPEL..."
-  dnf -y install epel-release >/dev/null 2>&1 || warn "Could not install epel-release."
-  dnf -y install certbot >/dev/null 2>&1 || die "Failed to install certbot (enable EPEL and retry)."
+  if command -v apt-get >/dev/null 2>&1; then
+    info "Installing certbot (apt)..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y certbot >/dev/null 2>&1 || die "Failed to install certbot."
+  else
+    info "Installing certbot from EPEL..."
+    dnf -y install epel-release >/dev/null 2>&1 || warn "Could not install epel-release."
+    dnf -y install certbot >/dev/null 2>&1 || die "Failed to install certbot (enable EPEL and retry)."
+  fi
   ok "certbot installed."
 fi
 
@@ -71,6 +79,12 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then
   firewall-cmd --add-port=80/tcp >/dev/null 2>&1 || true
   firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1 || true
   ok "Opened TCP/80 in firewalld."
+elif command -v ufw >/dev/null 2>&1; then
+  ufw_status="$(ufw status 2>/dev/null || true)"
+  if [[ "$ufw_status" == *active* ]]; then
+    ufw allow 80/tcp >/dev/null 2>&1 || true
+    ok "Opened TCP/80 in UFW."
+  fi
 fi
 # Sanity-check that the public DNS name points here (best effort).
 if command -v dig >/dev/null 2>&1; then
