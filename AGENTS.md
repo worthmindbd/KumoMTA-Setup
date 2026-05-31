@@ -142,6 +142,17 @@ changing them risks breaking the install or `kumod --validate`:
 - **SMTP AUTH handler signature is 4 args:** `smtp_server_auth_plain(authz,
   authc, password, conn_meta)` — `authc` is the username. (AUTH is offered only
   after STARTTLS; KumoMTA has no AUTH LOGIN event, only PLAIN.)
+- **Credentials are validated against a SQLite datasource**, the official
+  inbound-auth pattern (docs.kumomta.com/userguide/policy/inbound_auth ->
+  "Querying a Datasource for Authentication"). `init.lua` does
+  `local sqlite = require 'sqlite'`, defines `sqlite_auth_check(user, password)`
+  (returns false on blank password, else `select user from auth where user=? and
+  pass=?` and compares `result[1] == user`), wraps it in `kumo.memoize`
+  (`name='smtp_auth'`, `ttl='5 minutes'`, `capacity=100`) per the docs' warning,
+  and calls the cached function from `smtp_server_auth_plain`. The DB is seeded
+  by `write_auth_db()` at `/opt/kumomta/etc/auth.db`. Do NOT reintroduce the old
+  `os.getenv('SMTP_NEWS_PASSWORD')` / `secrets.env` env-var scheme — it was not a
+  documented KumoMTA pattern.
 - **Authenticated relay requires `relay_from_authz`** in `listener_domains.toml`
   (the `["*"]` block lists the SMTP user). Successful AUTH alone does NOT grant
   relay; without this an authenticated external client gets `5.7.1 relaying not
@@ -166,9 +177,10 @@ changing them risks breaking the install or `kumod --validate`:
 ## Conventions & guardrails
 
 - **Never commit secrets.** DKIM private keys and the SMTP password are created
-  on the target host only. The SMTP password lives in
-  `/opt/kumomta/etc/secrets.env` (chmod 600) and is injected via a systemd
-  `EnvironmentFile`. Do not write secrets into the repo or into the policy files.
+  on the target host only. The SMTP password lives in the SQLite auth datasource
+  `/opt/kumomta/etc/auth.db` (chmod 600, owned by `kumod`) and is read by
+  `init.lua` at AUTH time. Do not write secrets into the repo or into the policy
+  files.
 - Keep the installer **idempotent / re-runnable**: existing policy is backed up
   before regeneration, and an existing DKIM key is reused rather than
   regenerated (regenerating would invalidate the published DNS record).

@@ -166,8 +166,11 @@ will show ready-to-paste records:
 - **TLS for `kumod`:** Let's Encrypt keys are root-only, so certs are copied to
   `/opt/kumomta/etc/tls/` (owned by `kumod`); the renewal hook re-copies and
   restarts the service.
-- **Secrets:** the SMTP password is stored in `/opt/kumomta/etc/secrets.env`
-  (chmod 600) and injected via a systemd `EnvironmentFile` — never in git.
+- **Secrets:** the SMTP password is stored in a SQLite auth datasource at
+  `/opt/kumomta/etc/auth.db` (chmod 600, owned by `kumod`) and validated by
+  `init.lua` via the official inbound-auth pattern (`smtp_server_auth_plain`
+  querying SQLite, wrapped in `kumo.memoize`) — never in git, never in the
+  policy files.
 - **No implicit TLS (465):** KumoMTA supports STARTTLS only, so the installer
   binds listeners on **25** and **587** (STARTTLS) and does not use 465.
 

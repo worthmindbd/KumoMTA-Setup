@@ -48,7 +48,9 @@ KUMO_ETC="/opt/kumomta/etc"
 POLICY_DIR="$KUMO_ETC/policy"
 DKIM_DIR="$KUMO_ETC/dkim"
 TLS_DIR="$KUMO_ETC/tls"
-SECRETS_ENV="$KUMO_ETC/secrets.env"
+# SMTP AUTH credentials live in a SQLite datasource, queried by init.lua via the
+# official inbound-auth pattern (docs.kumomta.com/userguide/policy/inbound_auth).
+AUTH_DB="$KUMO_ETC/auth.db"
 SPOOL_DIR="/var/spool/kumomta"
 LOG_DIR="/var/log/kumomta"
 SUMMARY_FILE="/root/kumomta-install-summary.txt"
@@ -457,9 +459,10 @@ install_dependencies() {
       || die "apt-get update failed."
     #   gnupg -> gpg (key handling)        dnsutils -> dig (DNS checks)
     #   ufw   -> firewall                  gzip/zstd -> read repo + kumo logs
-    run_step "Installing prerequisites (curl, gnupg, openssl, ufw, dnsutils, gzip, zstd)" \
+    #   sqlite3 -> seed the SMTP AUTH datasource that init.lua queries
+    run_step "Installing prerequisites (curl, gnupg, openssl, ufw, dnsutils, sqlite3, gzip, zstd)" \
       apt-get install -y --no-install-recommends \
-        curl gnupg ca-certificates openssl ufw dnsutils gzip zstd \
+        curl gnupg ca-certificates openssl ufw dnsutils sqlite3 gzip zstd \
       || die "Failed to install base packages."
   else
     run_step "Refreshing dnf metadata" dnf -y makecache \
@@ -469,8 +472,9 @@ install_dependencies() {
     # package conflicts with curl-minimal and aborts the whole transaction.
     #   gnupg2 -> gpg (key handling)        bind-utils -> dig (DNS checks)
     #   firewalld -> firewall-cmd           gzip/zstd  -> read repo + kumo logs
-    run_step "Installing prerequisites (gnupg2, openssl, firewalld, bind-utils, gzip, zstd)" \
-      dnf -y install gnupg2 ca-certificates openssl firewalld bind-utils gzip zstd \
+    #   sqlite -> seed the SMTP AUTH datasource that init.lua queries
+    run_step "Installing prerequisites (gnupg2, openssl, firewalld, bind-utils, sqlite, gzip, zstd)" \
+      dnf -y install gnupg2 ca-certificates openssl firewalld bind-utils sqlite gzip zstd \
       || die "Failed to install base packages."
     if ! command -v curl >/dev/null 2>&1; then
       run_step "Installing curl" dnf -y install --allowerasing curl \
@@ -998,18 +1002,35 @@ EOF
   ok "Wrote $f"
 }
 
-write_secrets() {
-  install -m 600 /dev/null "$SECRETS_ENV"
-  echo "SMTP_NEWS_PASSWORD=${SMTP_PASS}" > "$SECRETS_ENV"
-  chown "$KUMO_USER:$KUMO_USER" "$SECRETS_ENV"
+write_auth_db() {
+  # SMTP AUTH credentials are stored in a SQLite datasource that init.lua
+  # queries via the official inbound-auth pattern:
+  #   https://docs.kumomta.com/userguide/policy/inbound_auth/
+  #   (see "Querying a Datasource for Authentication")
+  # The DB lives outside the policy dir (and out of git) and is readable only
+  # by the kumod service account. Rebuilt on every run (the password is fresh
+  # each install), so start from a clean file.
+  rm -f "$AUTH_DB" "$AUTH_DB-journal" "$AUTH_DB-wal" "$AUTH_DB-shm"
+  # Escape single quotes for SQLite string literals (doubling is the only
+  # escaping SQLite needs; backslashes are literal).
+  local u_esc=${SMTP_USER//\'/\'\'}
+  local p_esc=${SMTP_PASS//\'/\'\'}
+  sqlite3 "$AUTH_DB" <<SQL
+CREATE TABLE auth (user TEXT PRIMARY KEY, pass TEXT NOT NULL);
+INSERT INTO auth (user, pass) VALUES ('${u_esc}', '${p_esc}');
+SQL
+  chmod 600 "$AUTH_DB"
+  chown "$KUMO_USER:$KUMO_USER" "$AUTH_DB"
+
+  # Keep the file-descriptor limit bump (unrelated to secrets, but important
+  # for an MTA); no EnvironmentFile is needed any more.
   mkdir -p /etc/systemd/system/kumomta.service.d
   cat >/etc/systemd/system/kumomta.service.d/override.conf <<EOF
 [Service]
-EnvironmentFile=${SECRETS_ENV}
 LimitNOFILE=256000
 EOF
   systemctl daemon-reload
-  ok "SMTP password stored in $SECRETS_ENV (600) and wired via systemd."
+  ok "SMTP credentials stored in SQLite auth DB $AUTH_DB (600, kumod-only)."
 }
 
 write_tsa_init() {
@@ -1067,6 +1088,7 @@ write_init_lua() {
 --   https://docs.kumomta.com/userguide/configuration/example/
 -- Validate:  runuser -u ${KUMO_USER} -- /opt/kumomta/sbin/kumod --policy ${f} --validate
 local kumo = require 'kumo'
+local sqlite = require 'sqlite'
 local sources = require 'policy-extras.sources'
 local dkim_sign = require 'policy-extras.dkim_sign'
 local shaping = require 'policy-extras.shaping'
@@ -1151,12 +1173,36 @@ else
   kumo.on('get_egress_path_config', shaper.get_egress_path_config)
 end
 
--- Inbound SMTP AUTH PLAIN. KumoMTA passes FOUR args (authz, authc/username,
--- password, conn_meta) and only offers AUTH after STARTTLS. Returning true
--- marks the session authenticated, which is what permits relay for that client.
+-- Inbound SMTP AUTH PLAIN, validated against a SQLite datasource.
+-- This is the official pattern from the KumoMTA userguide:
+--   https://docs.kumomta.com/userguide/policy/inbound_auth/
+--     ("Querying a Datasource for Authentication")
+-- The lookup is wrapped in kumo.memoize per the docs' warning, so repeated
+-- AUTH attempts don't hit SQLite on every connection.
+-- KumoMTA passes FOUR args (authz, authc/username, password, conn_meta) and
+-- only offers AUTH after STARTTLS. A successful return marks the session
+-- authenticated, which is what relay_from_authz then authorizes for relay.
+local function sqlite_auth_check(user, password)
+  -- A blank password must never authenticate (an empty column would match).
+  if password == '' then
+    return false
+  end
+  local db = sqlite.open '${AUTH_DB}'
+  local result =
+    db:execute('select user from auth where user=? and pass=?', user, password)
+  db:close()
+  -- The query returns the username only when the password matched.
+  return result[1] == user
+end
+
+local cached_auth_check = kumo.memoize(sqlite_auth_check, {
+  name = 'smtp_auth',
+  ttl = '5 minutes',
+  capacity = 100,
+})
+
 kumo.on('smtp_server_auth_plain', function(authz, authc, password, conn_meta)
-  return authc == '${SMTP_USER}'
-    and password == os.getenv('SMTP_NEWS_PASSWORD')
+  return cached_auth_check(authc, password)
 end)
 
 kumo.on('smtp_server_message_received', function(msg)
@@ -1186,7 +1232,7 @@ write_all_configs() {
   write_shaping_toml
   write_queues_toml
   write_listener_domains_toml
-  write_secrets
+  write_auth_db
   write_tsa_init
   write_init_lua
   chown -R "$KUMO_USER:$KUMO_USER" "$POLICY_DIR" "$SPOOL_DIR" "$LOG_DIR"
