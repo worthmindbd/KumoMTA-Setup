@@ -215,6 +215,28 @@ the certificate, deploys it to `/opt/kumomta/etc/tls/`, enables STARTTLS on the
 `:587` listener in `init.lua`, installs the renewal hook, validates, and
 restarts KumoMTA.
 
+### Checking deliverability (SPF / DKIM / DMARC / PTR / TLS)
+
+Once your DNS records are in, confirm everything the inbox providers will look
+at actually resolves the way the installer set it up. This helper is read-only
+and checks **live** DNS from this host, deriving the domain, selector, IPs and
+hostnames from the generated policy:
+
+```bash
+sudo bash check-deliverability.sh         # auto-detects domain + selector
+bash check-deliverability.sh -T           # skip the live STARTTLS probe
+bash check-deliverability.sh -d example.com -s kumo
+```
+
+It verifies the forward **A** records, **PTR**/reverse DNS for every sending IP,
+the **SPF** record (lists all your IPs, ends `-all`), the **DKIM** record
+(and that the published `p=` key matches the installed private key), the
+**DMARC** record, and that **STARTTLS** on `:587` presents a cert valid for your
+primary hostname. It exits non-zero if any blocking check fails, so you can wire
+it into other scripts. Run with `sudo` so it can read the DKIM private key for
+the key-match check. For a real-world score, also send to a seed test such as
+mail-tester.com.
+
 ### Checking IP rotation
 
 When you send through more than one IP, KumoMTA spreads delivery across the IPs
