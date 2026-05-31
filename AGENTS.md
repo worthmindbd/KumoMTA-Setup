@@ -25,12 +25,14 @@ cert and wire STARTTLS into the policy after the fact (also cross-distro).
 ## Repository layout
 
 ```
-install.sh     The whole installer (Bash). Edit this for any behavior change.
-enable-ssl.sh  Re-runnable helper: obtain LE cert + enable STARTTLS post-install.
-README.md      End-user docs: requirements, ports, firewall, DNS workflow, usage.
-AGENTS.md      This file.
-CLAUDE.md      Symlink -> AGENTS.md (so Claude Code reads the same guidance).
-LICENSE        MIT license.
+install.sh        The whole installer (Bash). Edit this for any behavior change.
+enable-ssl.sh     Re-runnable helper: obtain LE cert + enable STARTTLS post-install.
+check-rotation.sh Re-runnable helper: burst-inject + tally egress-source (IP)
+                  rotation, and check each source IP's PTR.
+README.md         End-user docs: requirements, ports, firewall, DNS workflow, usage.
+AGENTS.md         This file.
+CLAUDE.md         Symlink -> AGENTS.md (so Claude Code reads the same guidance).
+LICENSE           MIT license.
 ```
 
 There are intentionally **no config files in the repo**. KumoMTA's policy files

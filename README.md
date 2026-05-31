@@ -215,6 +215,31 @@ the certificate, deploys it to `/opt/kumomta/etc/tls/`, enables STARTTLS on the
 `:587` listener in `init.lua`, installs the renewal hook, validates, and
 restarts KumoMTA.
 
+### Checking IP rotation
+
+When you send through more than one IP, KumoMTA spreads delivery across the IPs
+in the egress pool using **Weighted Round Robin**. That distribution is
+*probabilistic* and only emerges at volume — a couple of spaced-out test mails
+will keep coming from the first IP, because an idle scheduled queue resets its
+round-robin state after ~10 minutes (see the
+[Sending IPs](https://docs.kumomta.com/userguide/configuration/sendingips/) docs).
+
+To verify rotation, send a **burst** to a single inbox you control, then tally
+which egress source each delivery used. The helper does both (and checks each
+source IP's PTR):
+
+```bash
+sudo bash check-rotation.sh you@example.com         # burst of 20, then tally
+sudo bash check-rotation.sh -n 30 you@example.com   # bigger burst
+sudo bash check-rotation.sh -t you@example.com      # tally only (no send)
+```
+
+Send all messages to **one** destination domain — deliveries to a single
+provider share one scheduled queue, which is what actually exercises the
+rotation. Seeing two or more sources used confirms rotation is working; an
+uneven split is expected. You can also confirm receiver-side by opening a few of
+the messages in Gmail → **Show original** and comparing the `Received: from` IPs.
+
 ---
 
 ## License
