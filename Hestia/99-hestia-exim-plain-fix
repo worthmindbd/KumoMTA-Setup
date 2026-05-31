@@ -1,0 +1,11 @@
+// APT hook for HestiaCP server.
+//
+// Re-applies the Exim PLAIN-authenticator fix after any apt/dpkg operation,
+// so a HestiaCP/Exim package update that overwrites
+// /etc/exim4/exim4.conf.template cannot silently break authenticated relay
+// to the KumoMTA smart host. The fix script is idempotent, so running it on
+// every transaction is a no-op once already applied.
+//
+// Install to (on the HestiaCP server):
+//   /etc/apt/apt.conf.d/99-hestia-exim-plain-fix
+DPkg::Post-Invoke { "/usr/local/sbin/hestia-exim-plain-fix.sh || true"; };
